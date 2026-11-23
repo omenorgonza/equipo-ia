@@ -91,6 +91,12 @@ def campos_proyecto():
             {"id": "F_Bloqueo", "name": "Bloqueo", "dataType": "TEXT"}]
 
 
+def vista_json(v):
+    """Vista guardada en el estado → ProjectV2View. `agrupar` (lista de nombres de campo) simula Column by."""
+    return {"name": v["name"], "layout": v["layout"],
+            "verticalGroupByFields": {"nodes": [{"name": n} for n in v.get("agrupar", [])]}}
+
+
 def graphql(s, a):
     q = next((x[6:] for x in opt(a, "-f", True) if x.startswith("query=")), "")
     v = {}
@@ -107,7 +113,7 @@ def graphql(s, a):
     p = s["projects"][(v.get("id") or v.get("p")).split("_")[1]]
     if "fields(first" in q:
         return {"node": {"title": p["title"], "url": p["url"], "public": False,
-                         "fields": {"nodes": campos_proyecto()}, "views": {"nodes": p.get("views", [])}}}
+                         "fields": {"nodes": campos_proyecto()}, "views": {"nodes": [vista_json(x) for x in p.get("views", [])]}}}
     if "items(first" in q:
         nodes = []
         for iid, it in p["items"].items():

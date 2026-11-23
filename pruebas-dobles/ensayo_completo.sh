@@ -63,6 +63,24 @@ python3 equipo.py demo una-vez > "$S.ci2.log" 2>&1 || true
 grep -q "CI en verde" "$S.ci2.log" && ok "reintento con el log de la CI y CI en verde" || { cat "$S.ci2.log"; mal "CI en verde"; }
 grep -q "la CI del proyecto falló" "proyectos/demo/estado/prompts/issue-$N.md" && ok "el agente recibió el log del fallo" || mal "log de CI en el prompt"
 
+echo "== 4 bis. Vista «Tablero»: columnas por Estado (sin aviso) o por otro campo (aviso con el arreglo)"
+python3 - <<'PY'
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+for proyecto, campo in (("ensayo", "Estado"), ("demo", "Status")):
+    n = str(json.load(open(f"proyectos/{proyecto}/config.json"))["tablero"]["numero"])
+    s["projects"][n]["views"] = [{"name": "Tablero", "layout": "BOARD_LAYOUT", "agrupar": [campo]},
+                                 {"name": "Planning", "layout": "TABLE_LAYOUT"}]
+json.dump(s, open(st, "w"))
+PY
+python3 equipo.py ensayo tablero verificar > "$S.verif-ok.log" 2>&1 || true
+if grep -q "Columnas de «Tablero»: \['Estado'\]" "$S.verif-ok.log" && ! grep -q "Column by" "$S.verif-ok.log"; then
+  ok "agrupada por Estado: verificar sin aviso"
+else cat "$S.verif-ok.log"; mal "verificar avisa con la vista agrupada por Estado"; fi
+python3 equipo.py demo tablero verificar > "$S.verif-mal.log" 2>&1 || true
+grep -q "agrupa las columnas por Status, no por Estado: Vista Tablero → Column by → Estado → Save" "$S.verif-mal.log" \
+  && ok "agrupada por Status: verificar avisa con la instrucción" || { cat "$S.verif-mal.log"; mal "verificar sin aviso de agrupación"; }
+
 echo "== 5. Panel local"
 PUERTO=8791
 python3 equipo.py panel --puerto $PUERTO --no-abrir > "$S.panel.log" 2>&1 &
@@ -77,6 +95,12 @@ curl -sf "http://127.0.0.1:$PUERTO/api/estado" | python3 -c "
 import json,sys; d=json.load(sys.stdin); n=[p['nombre'] for p in d['proyectos']]
 assert {'ensayo','demo'} <= set(n), n
 assert all(p['error'] is None for p in d['proyectos']), [p['error'] for p in d['proyectos']]" && ok "estado de todos los proyectos" || mal "api/estado"
+curl -sf "http://127.0.0.1:$PUERTO/api/estado" | python3 -c "
+import json,sys; d={p['nombre']: p for p in json.load(sys.stdin)['proyectos']}
+aviso = lambda p: [a for a in d[p]['atencion'] if a['tipo'] == 'instalacion' and 'Column by' in a['texto']]
+assert not aviso('ensayo'), aviso('ensayo')
+assert aviso('demo') and 'Column by → Estado → Save' in aviso('demo')[0]['texto'], d['demo']['atencion']" \
+  && ok "panel: aviso de agrupación solo en el proyecto agrupado por Status" || mal "panel: aviso de agrupación"
 CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PUERTO/api/proyecto/demo/arrancar")
 [ "$CODIGO" = "403" ] && ok "acciones sin token rechazadas" || mal "acción sin token devolvió $CODIGO"
 kill $PANEL 2>/dev/null || true
