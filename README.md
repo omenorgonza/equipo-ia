@@ -28,8 +28,11 @@ python3 equipo.py nuevo contestspy --repo contestspy --stack vacio --descripcion
 
 ### Qué hace el panel
 
-- **Requiere tu atención**: PR por revisar, tarjetas bloqueadas (con «Reintentar con el agente»), avisos de
+- **Requiere tu atención**: PR por revisar, tarjetas bloqueadas, avisos de
   seguridad críticos/altos y CI en rojo en la rama principal, de todos los proyectos a la vez.
+  Toda tarjeta bloqueada tiene **Reanudar** (`coordinador.py reanudar N`: sigue desde el paso pendiente,
+  sin volver a llamar al agente si su trabajo ya está hecho); las que fallaron por CI, pruebas o falta de
+  cambios tienen además «Reintentar con el agente» (`reanudar N --desde agente`).
 - **Puesta a punto pendiente** (plegable): vistas del tablero, vista «Tablero» con columnas por otro campo
   que no es Estado (p. ej. Status), secreto TABLERO_TOKEN, PR de instalación.
 - **Una tarjeta por proyecto**: estado del README, resumen, contadores por columna, repos con su CI, tareas en
@@ -203,6 +206,7 @@ con la clave `agrupar` de cada vista (`{"name": "Tablero", "layout": "BOARD_LAYO
 |---|---|---|
 | Backlog | Óscar | captura una idea (`python3 tablero.py nueva "título"` o desde la web) |
 | Planning | TL o `mantenimiento.yml` | propuesta con evidencia |
+| Planning (o Backlog / To Do) | `tablero-issue.yml` | issue abierta sin pasar por el tablero (móvil, otra sesión): la añade en Planning, o en el estado de una etiqueta `estado:backlog\|planning\|todo`, con la prioridad de `prioridad:p0..p3`. Si quien la creó ya la colocó, no la toca |
 | To Do | **Óscar** | autoriza; la tarjeta tiene agente (`agent:*`), alcance y criterios |
 | Doing | coordinador local | tras reservar y volver a comprobar la elegibilidad, antes de invocar al agente |
 | Testing / Review | coordinador local | PR creada y vinculada (`Closes #N`) |
@@ -237,6 +241,9 @@ Equipo IA y moverla a To Do.
 - Ollama arranca los modelos con 4096 tokens de contexto → usar una variante con `num_ctx 32768`
   (`diagnostico` y `configurar-local` avisan y dan los comandos de PowerShell).
 - Tras crear una issue, GitHub tarda unos segundos en mostrarla al filtrar por etiqueta; el ensayo espera.
+- `gh pr edit` falla en gh 2.45 (consulta `projectCards`, de los Projects clásicos ya retirados) → al
+  reprocesar una tarea con PR abierta, el coordinador actualiza la descripción por la API REST
+  (`gh api -X PATCH repos/<repo>/pulls/<n> -f body=...`). El ensayo completo lo comprueba.
 
 ### Mantenimiento proactivo (GitHub Actions, con el PC apagado)
 
