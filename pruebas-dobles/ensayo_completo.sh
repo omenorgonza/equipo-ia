@@ -37,6 +37,13 @@ python3 equipo.py nuevo demo --repo demo-app --stack python --descripcion "Proye
 python3 -c "import json;c=json.load(open('proyectos/demo/config.json'));assert c['ci']['checks']==['pruebas'];assert c['fuente_cola']=='tablero'" \
   && ok "config del proyecto nuevo" || mal "config del proyecto nuevo"
 python3 -c "
+import json; import equipo as E
+c=json.load(open('proyectos/demo/config.json')); e=json.load(open('proyectos/ensayo/config.json'))
+assert c.get('color') in E.PALETA and e.get('color') in E.PALETA, (c.get('color'), e.get('color'))
+assert c['color'] != e['color'], 'dos proyectos con el mismo color por defecto'
+h=open('panel.html').read(); assert len(E.PALETA) == 8 and all('.c-'+x in h for x in E.PALETA)" \
+  && ok "color por defecto de los proyectos (paleta de 8)" || mal "color por defecto"
+python3 -c "
 import json,os; s=json.load(open(os.environ['FAKE_GH_STATE']))
 p=[p for p in s['projects'].values() if p['title']=='Equipo IA · demo'][0]
 assert p.get('copiado_de'), 'el tablero no se copió de la plantilla'" && ok "tablero copiado de la plantilla" || mal "plantilla del tablero"
@@ -56,12 +63,52 @@ N=$(python3 equipo.py demo tablero nueva "Tarea de CI" --agente local --objetivo
 [ -n "$N" ] && ok "tarea creada (#$N)" || mal "no se creó la tarea"
 python3 equipo.py demo una-vez > "$S.ci1.log" 2>&1 || true
 grep -q "CI en rojo" "$S.ci1.log" && ok "CI en rojo bloquea la tarea" || { cat "$S.ci1.log"; mal "CI en rojo"; }
-python3 -c "
-import json,os; st=os.environ['FAKE_GH_STATE']; s=json.load(open(st)); s['ci']['oscar/demo-app']='success'; json.dump(s,open(st,'w'))"
+N="$N" python3 - <<'PY'
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+s["ci"]["oscar/demo-app"] = "success"
+# Marca la descripción actual de la PR abierta de la tarea: el reproceso debe sustituirla.
+for p in s["prs"]:
+    if p["repo"] == "oscar/demo-app" and p["state"] == "OPEN" and p["head"].endswith(f"/issue-{os.environ['N']}"):
+        p["body"] = "DESCRIPCION-ANTERIOR\n" + p.get("body", "")
+s["calls"] = []
+json.dump(s, open(st, "w"))
+PY
 python3 equipo.py demo reanudar "$N" --desde agente > /dev/null
 python3 equipo.py demo una-vez > "$S.ci2.log" 2>&1 || true
 grep -q "CI en verde" "$S.ci2.log" && ok "reintento con el log de la CI y CI en verde" || { cat "$S.ci2.log"; mal "CI en verde"; }
+N="$N" python3 - <<'PY' && ok "descripción de la PR abierta actualizada por PATCH REST" || mal "descripción de la PR no actualizada"
+import json, os
+s = json.load(open(os.environ["FAKE_GH_STATE"]))
+prs = [p for p in s["prs"] if p["repo"] == "oscar/demo-app" and p["state"] == "OPEN"
+       and p["head"].endswith(f"/issue-{os.environ['N']}")]
+assert len(prs) == 1, f"se esperaba una sola PR abierta de la tarea: {prs}"
+b = prs[0]["body"]
+assert "DESCRIPCION-ANTERIOR" not in b, "la descripción no cambió"
+assert f"Closes #{os.environ['N']}" in b and "CI del proyecto" in b, b
+assert "api -X PATCH" in s["calls"], s["calls"]
+assert not any(c.startswith("pr edit") for c in s["calls"]), s["calls"]
+PY
+grep -q '"pr", "edit"' "$ORIG/coordinador.py" && mal "coordinador.py aún usa gh pr edit" || ok "coordinador.py no usa gh pr edit"
 grep -q "la CI del proyecto falló" "proyectos/demo/estado/prompts/issue-$N.md" && ok "el agente recibió el log del fallo" || mal "log de CI en el prompt"
+
+echo "== 4 bis. Vista «Tablero»: columnas por Estado (sin aviso) o por otro campo (aviso con el arreglo)"
+python3 - <<'PY'
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+for proyecto, campo in (("ensayo", "Estado"), ("demo", "Status")):
+    n = str(json.load(open(f"proyectos/{proyecto}/config.json"))["tablero"]["numero"])
+    s["projects"][n]["views"] = [{"name": "Tablero", "layout": "BOARD_LAYOUT", "agrupar": [campo]},
+                                 {"name": "Planning", "layout": "TABLE_LAYOUT"}]
+json.dump(s, open(st, "w"))
+PY
+python3 equipo.py ensayo tablero verificar > "$S.verif-ok.log" 2>&1 || true
+if grep -q "Columnas de «Tablero»: \['Estado'\]" "$S.verif-ok.log" && ! grep -q "Column by" "$S.verif-ok.log"; then
+  ok "agrupada por Estado: verificar sin aviso"
+else cat "$S.verif-ok.log"; mal "verificar avisa con la vista agrupada por Estado"; fi
+python3 equipo.py demo tablero verificar > "$S.verif-mal.log" 2>&1 || true
+grep -q "agrupa las columnas por Status, no por Estado: Vista Tablero → Column by → Estado → Save" "$S.verif-mal.log" \
+  && ok "agrupada por Status: verificar avisa con la instrucción" || { cat "$S.verif-mal.log"; mal "verificar sin aviso de agrupación"; }
 
 echo "== 5. Panel local"
 PUERTO=8791
@@ -77,6 +124,12 @@ curl -sf "http://127.0.0.1:$PUERTO/api/estado" | python3 -c "
 import json,sys; d=json.load(sys.stdin); n=[p['nombre'] for p in d['proyectos']]
 assert {'ensayo','demo'} <= set(n), n
 assert all(p['error'] is None for p in d['proyectos']), [p['error'] for p in d['proyectos']]" && ok "estado de todos los proyectos" || mal "api/estado"
+curl -sf "http://127.0.0.1:$PUERTO/api/estado" | python3 -c "
+import json,sys; d={p['nombre']: p for p in json.load(sys.stdin)['proyectos']}
+aviso = lambda p: [a for a in d[p]['atencion'] if a['tipo'] == 'instalacion' and 'Column by' in a['texto']]
+assert not aviso('ensayo'), aviso('ensayo')
+assert aviso('demo') and 'Column by → Estado → Save' in aviso('demo')[0]['texto'], d['demo']['atencion']" \
+  && ok "panel: aviso de agrupación solo en el proyecto agrupado por Status" || mal "panel: aviso de agrupación"
 CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PUERTO/api/proyecto/demo/arrancar")
 [ "$CODIGO" = "403" ] && ok "acciones sin token rechazadas" || mal "acción sin token devolvió $CODIGO"
 
@@ -127,6 +180,21 @@ for t in "$TOK_BUENO" "$TOK_SINPROJ" "$TOK_OTRO" "$TOK_FINO" "$TOK_MALO" "$ALEA"
   FUGAS+=$(grep -rlF -- "$t" "$S" "$S".* 2>/dev/null || true)
 done
 [ -z "$FUGAS" ] && ok "el token no aparece en logs, estado ni respuestas" || mal "el token aparece en: $FUGAS"
+CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" -d '{"color":"rosa"}' \
+  "http://127.0.0.1:$PUERTO/api/proyecto/demo/color")
+[ "$CODIGO" = "403" ] && ok "cambio de color sin token rechazado" || mal "color sin token devolvió $CODIGO"
+TOKEN=$(curl -sf "http://127.0.0.1:$PUERTO/" | sed -n 's/^const TOKEN = "\([^"]*\)";.*/\1/p')
+CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" -H "X-Token: $TOKEN" \
+  -d '{"color":"no-existe"}' "http://127.0.0.1:$PUERTO/api/proyecto/demo/color")
+[ "$CODIGO" = "400" ] && ok "color fuera de la paleta rechazado" || mal "color no válido devolvió $CODIGO"
+curl -sf -X POST -H "Content-Type: application/json" -H "X-Token: $TOKEN" -d '{"color":"rosa"}' \
+  "http://127.0.0.1:$PUERTO/api/proyecto/demo/color" > /dev/null \
+  && python3 -c "import json;assert json.load(open('proyectos/demo/config.json'))['color']=='rosa'" \
+  && curl -sf "http://127.0.0.1:$PUERTO/api/estado" | python3 -c "
+import json,sys; d=json.load(sys.stdin); assert [p['color'] for p in d['proyectos'] if p['nombre']=='demo']==['rosa']" \
+  && ok "color guardado con token en config.json" || mal "color con token no se guardó"
+CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"numero": 1}' "http://127.0.0.1:$PUERTO/api/proyecto/demo/reanudar")
+[ "$CODIGO" = "403" ] && ok "reanudar sin token rechazado" || mal "reanudar sin token devolvió $CODIGO"
 kill $PANEL 2>/dev/null || true
 python3 -c "
 import re; h=open('panel.html').read(); open('$S.panel.js','w').write(re.search(r'<script>(.*)</script>', h, re.S).group(1))"

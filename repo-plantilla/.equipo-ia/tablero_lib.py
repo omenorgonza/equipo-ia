@@ -35,6 +35,32 @@ class ErrorTablero(RuntimeError):
     pass
 
 
+VISTA_TABLERO = "Tablero"
+ARREGLO_AGRUPACION = f"Vista {VISTA_TABLERO} → Column by → {CAMPO_ESTADO} → Save"
+
+
+def agrupacion_vista(vista: dict) -> list[str]:
+    """Campos por los que una vista agrupa en columnas (ProjectV2View.verticalGroupByFields)."""
+    nodos = ((vista or {}).get("verticalGroupByFields") or {}).get("nodes") or []
+    return [n["name"] for n in nodos if n and n.get("name")]
+
+
+def aviso_agrupacion(info: dict) -> str | None:
+    """Aviso si la vista «Tablero» (Board) no agrupa sus columnas por Estado; None si está bien o no existe."""
+    vista = next((v for v in (info.get("views") or {}).get("nodes") or []
+                  if v and v.get("name") == VISTA_TABLERO), None)
+    if not vista:
+        return None
+    if vista.get("layout") != "BOARD_LAYOUT":
+        return (f"La vista «{VISTA_TABLERO}» no es de tipo Board ({vista.get('layout')}): cámbiala a Board y "
+                f"después {ARREGLO_AGRUPACION}")
+    campos = agrupacion_vista(vista)
+    if campos == [CAMPO_ESTADO]:
+        return None
+    actual = ", ".join(campos) or "ningún campo"
+    return f"La vista «{VISTA_TABLERO}» agrupa las columnas por {actual}, no por {CAMPO_ESTADO}: {ARREGLO_AGRUPACION}"
+
+
 class Tablero:
     def __init__(self, owner: str, numero: int, owner_tipo: str = "user", gh_bin: list[str] | None = None,
                  env: dict | None = None):
@@ -78,7 +104,8 @@ class Tablero:
         q = """query($id:ID!){ node(id:$id){ ... on ProjectV2 { title url public
           fields(first:50){ nodes{ ... on ProjectV2FieldCommon{ id name dataType }
                                    ... on ProjectV2SingleSelectField{ id name dataType options{ id name } } } }
-          views(first:20){ nodes{ name layout } } } } }"""
+          views(first:20){ nodes{ name layout
+            verticalGroupByFields(first:5){ nodes{ ... on ProjectV2FieldCommon{ name } } } } } } } }"""
         return self.graphql(q, id=self.id)["node"]
 
     @property

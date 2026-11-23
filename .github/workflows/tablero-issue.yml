@@ -1,0 +1,19 @@
+name: tablero-issue
+# Issue nueva → tarjeta en el tablero (Planning por defecto), sin depender del PC local.
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+  issues: read
+jobs:
+  al-tablero:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Añadir al tablero si nadie lo ha hecho
+        env:
+          GH_TOKEN: ${{ secrets.TABLERO_TOKEN }}
+          TABLERO_OWNER: ${{ vars.TABLERO_OWNER }}
+          TABLERO_NUMERO: ${{ vars.TABLERO_NUMERO }}
+        run: python .equipo-ia/sincronizar.py issue-abierta --issue ${{ github.event.issue.number }}

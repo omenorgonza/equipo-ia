@@ -366,11 +366,14 @@ class GH:
         abiertas = [p for p in prs if p.get("state") == "OPEN"]
         return (abiertas or prs or [None])[0]
 
+    def editar_cuerpo_pr(self, numero: int, cuerpo: str) -> None:
+        """Actualiza la descripción por la API REST: la edición de PR de gh 2.45 falla al consultar projectCards."""
+        self.run("api", "-X", "PATCH", f"repos/{self.repo}/pulls/{numero}", "-f", f"body={cuerpo}")
+
     def crear_o_actualizar_pr(self, rama: str, base: str, titulo: str, cuerpo: str, borrador: bool = False) -> dict:
         existente = self.pr_de_rama(rama)
         if existente and existente.get("state") == "OPEN":
-            self.run("pr", "edit", str(existente["number"]), "--repo", self.repo, "--body-file", "-",
-                     stdin_text=cuerpo)
+            self.editar_cuerpo_pr(existente["number"], cuerpo)
             return existente
         self.run("pr", "create", "--repo", self.repo, "--head", rama, "--base", base,
                  "--title", titulo, "--body-file", "-", *(["--draft"] if borrador else []), stdin_text=cuerpo)
