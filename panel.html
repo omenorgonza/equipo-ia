@@ -179,6 +179,7 @@ function pintar() {
     <div class="at ${a.nivel}"><span class="p">${esc(a.proyecto)}</span>
       <span class="t">${a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.texto)}</a>` : esc(a.texto)}</span>
       ${a.reintentar ? `<button class="mini" onclick="reintentar('${a.proyecto}', ${a.numero})">Reintentar con el agente</button>` : ""}
+      ${a.reanudar ?`<button class="mini" onclick="reanudar('${a.proyecto}', ${a.numero})" title="Continúa desde el paso pendiente sin volver a llamar al agente">Reanudar</button>` : ""}
     </div>`).join("") : `<div class="vacio">Nada urgente. El equipo puede seguir solo. 🎉</div>`;
 
   ps.sort((a, b) => b.atencion.filter(x => x.nivel === "alta").length - a.atencion.filter(x => x.nivel === "alta").length
@@ -215,6 +216,7 @@ function pintar() {
 
 async function accion(p, a) { const r = await post(`/api/proyecto/${p}/${a}`); toast(r.mensaje || r.error); setTimeout(() => cargar(), 1200); }
 async function reintentar(p, n) { const r = await post(`/api/proyecto/${p}/reintentar`, {numero: n}); toast(r.ok ? `#${n} vuelve a To Do para el agente` : r.mensaje); setTimeout(() => cargar(true), 1500); }
+async function reanudar(p, n) { const r = await post(`/api/proyecto/${p}/reanudar`, {numero: n}); toast(r.ok ? `#${n} se reanuda desde el paso pendiente` : (r.mensaje || r.error)); setTimeout(() => cargar(true), 1500); }
 async function verLog(p) { const r = await (await fetch(`/api/proyecto/${p}/log`)).json();
   document.getElementById("logbox").hidden = false; document.getElementById("log-t").textContent = `Log del equipo · ${p}`;
   document.getElementById("log-pre").textContent = r.log; document.getElementById("logbox").scrollIntoView({behavior: "smooth"}); }
