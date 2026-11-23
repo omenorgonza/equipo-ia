@@ -163,7 +163,8 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
                 salida["atencion"].append({"nivel": "alta", "tipo": "bloqueo", "numero": it["numero"],
                                            "texto": f"#{it['numero']} bloqueada: {it['bloqueo'][:160]}",
                                            "url": it["url"], "reintentar": "CI en rojo" in it["bloqueo"]
-                                           or "sin modificar" in it["bloqueo"] or "Pruebas fallidas" in it["bloqueo"]})
+                                           or "sin modificar" in it["bloqueo"] or "Pruebas fallidas" in it["bloqueo"],
+                                           "reanudar": True})
             elif e == T.REVIEW:
                 salida["atencion"].append({"nivel": "alta", "tipo": "revision",
                                            "texto": f"PR para revisar: #{it['numero']} {it['titulo'][:70]}",
@@ -266,6 +267,12 @@ def reintentar(nombre: str, numero: int) -> dict:
     return {"ok": r.returncode == 0, "mensaje": (r.stdout or r.stderr).strip()[-300:]}
 
 
+def reanudar(nombre: str, numero: int) -> dict:
+    """Continúa una tarea bloqueada desde su paso pendiente (sin --desde: no repite el trabajo del agente)."""
+    r = E.script(nombre, "coordinador.py", "reanudar", str(numero), capturar=True, timeout=60)
+    return {"ok": r.returncode == 0, "mensaje": (r.stdout or r.stderr).strip()[-300:]}
+
+
 def log_proyecto(nombre: str) -> str:
     p = E.PROYECTOS / nombre / "estado" / "vigilar.log"
     if not p.exists():
@@ -326,7 +333,7 @@ class Manejador(BaseHTTPRequestHandler):
         largo = int(self.headers.get("Content-Length") or 0)
         cuerpo = json.loads(self.rfile.read(largo) or b"{}") if largo else {}
         ruta = self.path
-        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/(arrancar|parar|reintentar)$", ruta)
+        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/(arrancar|parar|reintentar|reanudar)$", ruta)
         if m:
             nombre, accion = m.groups()
             if nombre not in E.proyectos():
@@ -335,6 +342,8 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._json(arrancar(nombre))
             if accion == "parar":
                 return self._json(parar(nombre))
+            if accion == "reanudar":
+                return self._json(reanudar(nombre, int(cuerpo.get("numero", 0))))
             return self._json(reintentar(nombre, int(cuerpo.get("numero", 0))))
         if ruta in ("/api/proyectos/importar", "/api/proyectos/nuevo"):
             nuevo = ruta.endswith("nuevo")

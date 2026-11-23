@@ -28,8 +28,11 @@ python3 equipo.py nuevo contestspy --repo contestspy --stack vacio --descripcion
 
 ### Qué hace el panel
 
-- **Requiere tu atención**: PR por revisar, tarjetas bloqueadas (con «Reintentar con el agente»), avisos de
+- **Requiere tu atención**: PR por revisar, tarjetas bloqueadas, avisos de
   seguridad críticos/altos y CI en rojo en la rama principal, de todos los proyectos a la vez.
+  Toda tarjeta bloqueada tiene **Reanudar** (`coordinador.py reanudar N`: sigue desde el paso pendiente,
+  sin volver a llamar al agente si su trabajo ya está hecho); las que fallaron por CI, pruebas o falta de
+  cambios tienen además «Reintentar con el agente» (`reanudar N --desde agente`).
 - **Puesta a punto pendiente** (plegable): vistas del tablero, secreto TABLERO_TOKEN, PR de instalación.
 - **Una tarjeta por proyecto**: estado del README, resumen, contadores por columna, repos con su CI, tareas en
   curso, enlaces al tablero y botones Arrancar/Parar/Ver log.
