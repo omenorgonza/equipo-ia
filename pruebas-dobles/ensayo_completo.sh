@@ -56,11 +56,33 @@ N=$(python3 equipo.py demo tablero nueva "Tarea de CI" --agente local --objetivo
 [ -n "$N" ] && ok "tarea creada (#$N)" || mal "no se creó la tarea"
 python3 equipo.py demo una-vez > "$S.ci1.log" 2>&1 || true
 grep -q "CI en rojo" "$S.ci1.log" && ok "CI en rojo bloquea la tarea" || { cat "$S.ci1.log"; mal "CI en rojo"; }
-python3 -c "
-import json,os; st=os.environ['FAKE_GH_STATE']; s=json.load(open(st)); s['ci']['oscar/demo-app']='success'; json.dump(s,open(st,'w'))"
+N="$N" python3 - <<'PY'
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+s["ci"]["oscar/demo-app"] = "success"
+# Marca la descripción actual de la PR abierta de la tarea: el reproceso debe sustituirla.
+for p in s["prs"]:
+    if p["repo"] == "oscar/demo-app" and p["state"] == "OPEN" and p["head"].endswith(f"/issue-{os.environ['N']}"):
+        p["body"] = "DESCRIPCION-ANTERIOR\n" + p.get("body", "")
+s["calls"] = []
+json.dump(s, open(st, "w"))
+PY
 python3 equipo.py demo reanudar "$N" --desde agente > /dev/null
 python3 equipo.py demo una-vez > "$S.ci2.log" 2>&1 || true
 grep -q "CI en verde" "$S.ci2.log" && ok "reintento con el log de la CI y CI en verde" || { cat "$S.ci2.log"; mal "CI en verde"; }
+N="$N" python3 - <<'PY' && ok "descripción de la PR abierta actualizada por PATCH REST" || mal "descripción de la PR no actualizada"
+import json, os
+s = json.load(open(os.environ["FAKE_GH_STATE"]))
+prs = [p for p in s["prs"] if p["repo"] == "oscar/demo-app" and p["state"] == "OPEN"
+       and p["head"].endswith(f"/issue-{os.environ['N']}")]
+assert len(prs) == 1, f"se esperaba una sola PR abierta de la tarea: {prs}"
+b = prs[0]["body"]
+assert "DESCRIPCION-ANTERIOR" not in b, "la descripción no cambió"
+assert f"Closes #{os.environ['N']}" in b and "CI del proyecto" in b, b
+assert "api -X PATCH" in s["calls"], s["calls"]
+assert not any(c.startswith("pr edit") for c in s["calls"]), s["calls"]
+PY
+grep -q '"pr", "edit"' "$ORIG/coordinador.py" && mal "coordinador.py aún usa gh pr edit" || ok "coordinador.py no usa gh pr edit"
 grep -q "la CI del proyecto falló" "proyectos/demo/estado/prompts/issue-$N.md" && ok "el agente recibió el log del fallo" || mal "log de CI en el prompt"
 
 echo "== 5. Panel local"
