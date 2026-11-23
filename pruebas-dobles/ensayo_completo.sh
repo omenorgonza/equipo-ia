@@ -67,8 +67,12 @@ echo "== 5. Panel local"
 PUERTO=8791
 python3 equipo.py panel --puerto $PUERTO --no-abrir > "$S.panel.log" 2>&1 &
 PANEL=$!
-sleep 3
-curl -sf "http://127.0.0.1:$PUERTO/" | grep -q "Equipo IA" && ok "panel responde" || mal "panel no responde"
+LISTO=no
+for _ in $(seq 1 60); do   # hasta 30 s: el runner de GitHub puede tardar en arrancar el panel
+  if curl -sf "http://127.0.0.1:$PUERTO/" | grep -q "Equipo IA"; then LISTO=si; break; fi
+  sleep 0.5
+done
+[ "$LISTO" = si ] && ok "panel responde" || { mal "panel no responde"; tail -20 "$S.panel.log"; }
 curl -sf "http://127.0.0.1:$PUERTO/api/estado" | python3 -c "
 import json,sys; d=json.load(sys.stdin); n=[p['nombre'] for p in d['proyectos']]
 assert {'ensayo','demo'} <= set(n), n
