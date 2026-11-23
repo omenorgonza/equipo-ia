@@ -91,6 +91,12 @@ def campos_proyecto():
             {"id": "F_Bloqueo", "name": "Bloqueo", "dataType": "TEXT"}]
 
 
+def vista_json(v):
+    """Vista guardada en el estado → ProjectV2View. `agrupar` (lista de nombres de campo) simula Column by."""
+    return {"name": v["name"], "layout": v["layout"],
+            "verticalGroupByFields": {"nodes": [{"name": n} for n in v.get("agrupar", [])]}}
+
+
 def graphql(s, a):
     q = next((x[6:] for x in opt(a, "-f", True) if x.startswith("query=")), "")
     v = {}
@@ -107,7 +113,7 @@ def graphql(s, a):
     p = s["projects"][(v.get("id") or v.get("p")).split("_")[1]]
     if "fields(first" in q:
         return {"node": {"title": p["title"], "url": p["url"], "public": False,
-                         "fields": {"nodes": campos_proyecto()}, "views": {"nodes": p.get("views", [])}}}
+                         "fields": {"nodes": campos_proyecto()}, "views": {"nodes": [vista_json(x) for x in p.get("views", [])]}}}
     if "items(first" in q:
         nodes = []
         for iid, it in p["items"].items():
@@ -204,6 +210,18 @@ def api(s, a):
         if metodo == "PUT":
             return None
         print("HTTP/2.0 204 No Content"); return None
+    m = re.fullmatch(r"pulls/(\d+)", sub)
+    if m:
+        p = next((p for p in s["prs"] if p["repo"] == repo and p["number"] == int(m.group(1))), None)
+        if not p:
+            print("HTTP 404: Not Found", file=sys.stderr); sys.exit(1)
+        if metodo == "PATCH":
+            for val in opt(a, "-f", True) + opt(a, "-F", True):
+                k, v = val.split("=", 1)
+                if k in ("body", "title"):
+                    p[k] = v
+        return {"number": p["number"], "html_url": p["url"], "state": p["state"].lower(),
+                "title": p["title"], "body": p.get("body", "")}
     if "/permission" in sub:
         return {"permission": "admin"}
     raise SystemExit("api no soportada: " + ruta)
@@ -318,13 +336,14 @@ elif a[:2] == ["pr", "create"]:
                      "head": opt(a, "--head"), "base": opt(a, "--base"), "title": opt(a, "--title"), "body": b,
                      "draft": "--draft" in a, "closes": [int(x) for x in re.findall(r"Closes #(\d+)", b)]})
     texto = s["prs"][-1]["url"]
-elif a[:2] in (["pr", "edit"], ["pr", "ready"]):
+elif a[:2] == ["pr", "edit"]:
+    # gh 2.45 falla aquí por projectCards: el coordinador debe editar por la API REST.
+    print("GraphQL: Projects (classic) is being deprecated (repository.pullRequest.projectCards)", file=sys.stderr)
+    sys.exit(1)
+elif a[:2] == ["pr", "ready"]:
     for p in s["prs"]:
         if str(p["number"]) == a[2] and p["repo"] == repo_de(a):
-            if a[1] == "edit":
-                p["body"] = body(a)
-            else:
-                p["draft"] = False
+            p["draft"] = False
 elif a[:2] == ["run", "view"] and "--log-failed" in a:
     texto = "tests\tRun phpunit\tFAILURES!\ntests\tRun phpunit\tBudgetTest::testLimite: Failed asserting that 90 is 100."
 else:

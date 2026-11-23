@@ -34,7 +34,7 @@ import coordinador as C  # noqa: E402  (sin proyecto: solo utilidades)
 
 NOMBRE_OK = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 REPO_OK = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-NUESTROS_WORKFLOWS = ("tablero-pr.yml", "mantenimiento.yml", "despliegue.yml", "aviso-critico.yml")
+NUESTROS_WORKFLOWS = ("tablero-pr.yml", "tablero-issue.yml", "mantenimiento.yml", "despliegue.yml", "aviso-critico.yml")
 STACKS = ("python", "vacio")
 # Colores de proyecto para el panel (clave «color» en proyectos/<p>/config.json). panel.html define cada uno
 # con la clase .c-<nombre> en modo claro y oscuro; si añades uno aquí, añádelo también allí.
@@ -281,7 +281,9 @@ def preparar_github(repo: str, tablero: dict, simulado: bool) -> list[str]:
     """Etiquetas, variables, Dependabot y comprobación del secreto. Devuelve pendientes para Óscar."""
     pendientes = []
     colores = {"agent:claude": "D97757", "agent:local": "2B7A78", "mantenimiento": "5319E7", "simulado": "C5DEF5",
-               "registro-mantenimiento": "BFDADC", "dependencias": "0366D6"}
+               "registro-mantenimiento": "BFDADC", "dependencias": "0366D6",
+               "estado:backlog": "EDEDED", "estado:planning": "FBCA04", "estado:todo": "0E8A16",
+               "prioridad:p0": "B60205", "prioridad:p1": "D93F0B", "prioridad:p2": "FBCA04", "prioridad:p3": "C2E0C6"}
     for etq, color in colores.items():
         gh("label", "create", etq, "--repo", repo, "--color", color, "--force", comprobar=False)
     if simulado:
@@ -322,7 +324,7 @@ def instalar_en_repo(repo: str, clon: Path, tablero: dict, checks: list[str], wo
     git("push", "-f", "-u", "origin", "equipo-ia/instalacion", cwd=clon)
     cuerpo = ("Instala el **Equipo IA** en este repositorio. No cambia código de la aplicación.\n\n"
               "- `.equipo-ia/`: mantenimiento semanal, sincronización Done/PRO y aviso crítico.\n"
-              "- `.github/workflows/`: tablero-pr, mantenimiento, despliegue (simulado) y aviso-critico.\n"
+              "- `.github/workflows/`: tablero-pr, tablero-issue, mantenimiento, despliegue (simulado) y aviso-critico.\n"
               "- `.github/ISSUE_TEMPLATE/tarea-agente.yml` y `dependabot.yml` (si no existía).\n\n"
               f"Checks requeridos para pasar a Done: {', '.join(checks) or '(ninguno)'}.\n\n"
               "Revísala e intégrala cuando te parezca bien.")
