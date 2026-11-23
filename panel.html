@@ -83,6 +83,34 @@
   .at a, .repo a, .tarj a { color: inherit; }
   .puesta { margin-top: 10px; }
   .puesta summary { padding: 8px 2px; }
+  /* Color propio de cada proyecto (E.PALETA en equipo.py). --pc: franja y muestra; --pc-bg: fondo suave de la
+     tarjeta; --pc-tag / --pc-ink: etiqueta en «Requiere tu atención». Texto con contraste AA en claro y oscuro. */
+  .c-azul     { --pc: #3b74d1; --pc-bg: #f1f5fd; --pc-tag: #d6e3f8; --pc-ink: #1c4385; }
+  .c-verde    { --pc: #3a9a5b; --pc-bg: #f1f9f3; --pc-tag: #d5eedc; --pc-ink: #1d5a33; }
+  .c-naranja  { --pc: #e07a2e; --pc-bg: #fdf5ee; --pc-tag: #fbe3cf; --pc-ink: #8a4210; }
+  .c-violeta  { --pc: #7b57c9; --pc-bg: #f6f2fd; --pc-tag: #e3daf6; --pc-ink: #47288a; }
+  .c-turquesa { --pc: #1f9a94; --pc-bg: #eff8f7; --pc-tag: #ccecea; --pc-ink: #0f5652; }
+  .c-rosa     { --pc: #cf4f8f; --pc-bg: #fdf2f7; --pc-tag: #f7d9e8; --pc-ink: #852456; }
+  .c-ambar    { --pc: #c99a06; --pc-bg: #fcf9ea; --pc-tag: #f6ebb8; --pc-ink: #6b5203; }
+  .c-rojo     { --pc: #d64545; --pc-bg: #fdf3f2; --pc-tag: #f9dcd9; --pc-ink: #8a1f1f; }
+  @media (prefers-color-scheme: dark) {
+    .c-azul     { --pc: #6d9be6; --pc-bg: #1d2331; --pc-tag: #24365a; --pc-ink: #d3e2ff; }
+    .c-verde    { --pc: #5bb87b; --pc-bg: #1c2621; --pc-tag: #23402d; --pc-ink: #c8f0d4; }
+    .c-naranja  { --pc: #e8924f; --pc-bg: #2a221b; --pc-tag: #4a3020; --pc-ink: #ffdcc0; }
+    .c-violeta  { --pc: #a185e3; --pc-bg: #231f2e; --pc-tag: #372b55; --pc-ink: #e3d8ff; }
+    .c-turquesa { --pc: #45bdb6; --pc-bg: #1b2827; --pc-tag: #1f3f3d; --pc-ink: #c2efec; }
+    .c-rosa     { --pc: #e078ab; --pc-bg: #2a1e25; --pc-tag: #4a2439; --pc-ink: #ffd3e8; }
+    .c-ambar    { --pc: #d9b340; --pc-bg: #28251b; --pc-tag: #463d1c; --pc-ink: #fbe9a8; }
+    .c-rojo     { --pc: #e46a5f; --pc-bg: #2a1e1d; --pc-tag: #4a2522; --pc-ink: #ffd5d0; }
+  }
+  .card[class*="c-"] { background: var(--pc-bg); border-top: 5px solid var(--pc); }
+  .card.foco[class*="c-"] { border-color: var(--accent); border-top-color: var(--pc); }
+  .at .p[class*="c-"] { background: var(--pc-tag); color: var(--pc-ink); font-weight: 600; }
+  .paleta { display: inline-flex; gap: 5px; align-items: center; margin-left: auto; }
+  .paleta button { width: 16px; height: 16px; padding: 0; border-radius: 50%; background: var(--pc);
+                   border: 2px solid transparent; }
+  .paleta button.sel { border-color: var(--ink); box-shadow: 0 0 0 1px var(--card); }
+  .paleta button:hover { border-color: var(--muted); }
 </style>
 </head>
 <body>
@@ -142,6 +170,7 @@
 const TOKEN = "__TOKEN__";
 const COLS = ["Backlog","Planning","To Do","Doing","Testing / Review","Done","PRO"];
 const CORTO = {"Testing / Review": "Review"};
+const PALETA = ["azul","verde","naranja","violeta","turquesa","rosa","ambar","rojo"];  // = PALETA de equipo.py
 let datos = null, orden = [];
 
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
@@ -164,10 +193,10 @@ function pintar() {
   const ps = datos.proyectos;
   document.getElementById("gen").textContent = `${ps.length} proyecto(s) · ${datos.generado.slice(11,16)}`;
   const at = [];
-  ps.forEach(p => p.atencion.forEach(a => at.push({...a, proyecto: p.nombre})));
+  ps.forEach(p => p.atencion.forEach(a => at.push({...a, proyecto: p.nombre, color: p.color})));
   at.sort((a, b) => (a.nivel === b.nivel ? 0 : a.nivel === "alta" ? -1 : 1));
   const fila = a => `
-    <div class="at ${a.nivel}"><span class="p">${esc(a.proyecto)}</span>
+    <div class="at ${a.nivel}"><span class="p c-${esc(a.color)}">${esc(a.proyecto)}</span>
       <span class="t">${a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.texto)}</a>` : esc(a.texto)}</span>
     </div>`;
   const puesta = at.filter(a => a.tipo === "instalacion");
@@ -176,7 +205,7 @@ function pintar() {
   document.getElementById("puesta-l").innerHTML = puesta.map(fila).join("");
   const urgente = at.filter(a => a.tipo !== "instalacion");
   document.getElementById("atencion").innerHTML = urgente.length ? urgente.map(a => `
-    <div class="at ${a.nivel}"><span class="p">${esc(a.proyecto)}</span>
+    <div class="at ${a.nivel}"><span class="p c-${esc(a.color)}">${esc(a.proyecto)}</span>
       <span class="t">${a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.texto)}</a>` : esc(a.texto)}</span>
       ${a.reintentar ? `<button class="mini" onclick="reintentar('${a.proyecto}', ${a.numero})">Reintentar con el agente</button>` : ""}
     </div>`).join("") : `<div class="vacio">Nada urgente. El equipo puede seguir solo. 🎉</div>`;
@@ -187,7 +216,7 @@ function pintar() {
     const altas = p.atencion.filter(a => a.nivel === "alta").length;
     const rd = (p.repos[0] || {}).readme || {};
     const activas = ["Testing / Review", "Doing", "To Do"].flatMap(e => (p.tarjetas[e] || []).map(t => ({...t, e})));
-    return `<article class="card ${altas ? "foco" : ""}">
+    return `<article class="card c-${esc(p.color)} ${altas ? "foco" : ""}">
       <div class="top"><h3>${esc(p.nombre)}</h3>
         <span class="pill ${p.activo ? "on" : "off"}">${p.activo ? "Equipo trabajando" : "Equipo parado"}</span></div>
       ${p.descripcion ? `<p class="desc">${esc(p.descripcion)}</p>` : ""}
@@ -210,10 +239,15 @@ function pintar() {
         ${p.activo ? `<button class="mini" onclick="accion('${p.nombre}','parar')">Parar equipo</button>`
                    : `<button class="mini primary" onclick="accion('${p.nombre}','arrancar')">Arrancar equipo</button>`}
         <button class="mini" onclick="verLog('${p.nombre}')">Ver log</button>
+        <span class="paleta" title="Color del proyecto">${PALETA.map(c => `<button class="c-${c} ${c === p.color ? "sel" : ""}"
+          title="${c}" aria-label="Color ${c}" onclick="cambiarColor('${p.nombre}','${c}')"></button>`).join("")}</span>
       </div></article>`; }).join("") || `<div class="vacio">Aún no hay proyectos. Usa «Nuevo proyecto» o «Añadir proyecto existente».</div>`;
 }
 
 async function accion(p, a) { const r = await post(`/api/proyecto/${p}/${a}`); toast(r.mensaje || r.error); setTimeout(() => cargar(), 1200); }
+async function cambiarColor(p, c) { const r = await post(`/api/proyecto/${p}/color`, {color: c});
+  if (!r.ok) return toast(r.error || "No se pudo guardar el color");
+  const pr = datos.proyectos.find(x => x.nombre === p); if (pr) pr.color = r.color; pintar(); }
 async function reintentar(p, n) { const r = await post(`/api/proyecto/${p}/reintentar`, {numero: n}); toast(r.ok ? `#${n} vuelve a To Do para el agente` : r.mensaje); setTimeout(() => cargar(true), 1500); }
 async function verLog(p) { const r = await (await fetch(`/api/proyecto/${p}/log`)).json();
   document.getElementById("logbox").hidden = false; document.getElementById("log-t").textContent = `Log del equipo · ${p}`;

@@ -130,7 +130,8 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
     cfg = E.cfg_proyecto(nombre)
     repos = cfg.get("repos") or [cfg.get("repo")]
     tb = cfg.get("tablero") or {}
-    salida = {"nombre": nombre, "descripcion": cfg.get("descripcion", ""), "repos": [], "tablero": tb.get("url"),
+    salida = {"nombre": nombre, "descripcion": cfg.get("descripcion", ""), "color": E.color_proyecto(nombre),
+              "repos": [], "tablero": tb.get("url"),
               "activo": E.coordinador_activo(nombre), "columnas": {e: 0 for e in T.ESTADOS}, "atencion": [],
               "tarjetas": {}, "error": None}
 
@@ -266,6 +267,13 @@ def reintentar(nombre: str, numero: int) -> dict:
     return {"ok": r.returncode == 0, "mensaje": (r.stdout or r.stderr).strip()[-300:]}
 
 
+def cambiar_color(nombre: str, color) -> tuple[dict, int]:
+    if color not in E.PALETA:
+        return {"ok": False, "error": f"Color no válido; usa uno de: {', '.join(E.PALETA)}"}, 400
+    E.guardar_cfg_proyecto(nombre, {"color": color})
+    return {"ok": True, "color": color, "mensaje": f"Color de {nombre}: {color}"}, 200
+
+
 def log_proyecto(nombre: str) -> str:
     p = E.PROYECTOS / nombre / "estado" / "vigilar.log"
     if not p.exists():
@@ -326,11 +334,13 @@ class Manejador(BaseHTTPRequestHandler):
         largo = int(self.headers.get("Content-Length") or 0)
         cuerpo = json.loads(self.rfile.read(largo) or b"{}") if largo else {}
         ruta = self.path
-        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/(arrancar|parar|reintentar)$", ruta)
+        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/(arrancar|parar|reintentar|color)$", ruta)
         if m:
             nombre, accion = m.groups()
             if nombre not in E.proyectos():
                 return self._json({"error": "proyecto desconocido"}, 404)
+            if accion == "color":
+                return self._json(*cambiar_color(nombre, cuerpo.get("color")))
             if accion == "arrancar":
                 return self._json(arrancar(nombre))
             if accion == "parar":
