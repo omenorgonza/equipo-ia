@@ -231,6 +231,9 @@ Equipo IA y moverla a To Do.
 - Ollama arranca los modelos con 4096 tokens de contexto → usar una variante con `num_ctx 32768`
   (`diagnostico` y `configurar-local` avisan y dan los comandos de PowerShell).
 - Tras crear una issue, GitHub tarda unos segundos en mostrarla al filtrar por etiqueta; el ensayo espera.
+- `gh pr edit` falla en gh 2.45 (consulta `projectCards`, de los Projects clásicos ya retirados) → al
+  reprocesar una tarea con PR abierta, el coordinador actualiza la descripción por la API REST
+  (`gh api -X PATCH repos/<repo>/pulls/<n> -f body=...`). El ensayo completo lo comprueba.
 
 ### Mantenimiento proactivo (GitHub Actions, con el PC apagado)
 
