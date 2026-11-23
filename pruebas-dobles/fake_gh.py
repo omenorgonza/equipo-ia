@@ -75,7 +75,33 @@ def head_sha(repo, rama):
     return r.stdout.split()[0] if r.stdout.strip() else None
 
 
+def en_conflicto(p):
+    """Como GitHub: la PR choca con su base si un merge de prueba da conflicto. p["conflicto"] lo fuerza."""
+    if "conflicto" in p:
+        return bool(p["conflicto"])
+    if p.get("merged") or p["state"] != "OPEN":
+        return False
+    r = subprocess.run(["git", "-C", remoto(p["repo"]), "merge-tree", "--write-tree",
+                        f"refs/heads/{p['base']}", f"refs/heads/{p['head']}"], capture_output=True, text=True)
+    return r.returncode == 1  # 0 = limpio; 1 = conflictos; otro = no calculable (rama ausente, git antiguo)
+
+
+def commit_ajeno(p):
+    """Simula a alguien (el TL) subiendo un commit a la rama de la PR directamente en el remoto."""
+    rem, padre = remoto(p["repo"]), head_sha(p["repo"], p["head"])
+    arbol = subprocess.run(["git", "-C", rem, "rev-parse", f"{padre}^{{tree}}"], capture_output=True, text=True,
+                           check=True).stdout.strip()
+    env = {**os.environ, "GIT_AUTHOR_NAME": "TL", "GIT_AUTHOR_EMAIL": "tl@equipo-ia.local",
+           "GIT_COMMITTER_NAME": "TL", "GIT_COMMITTER_EMAIL": "tl@equipo-ia.local"}
+    nuevo = subprocess.run(["git", "-C", rem, "commit-tree", arbol, "-p", padre, "-m", "Commit ajeno del TL"],
+                           capture_output=True, text=True, check=True, env=env).stdout.strip()
+    subprocess.run(["git", "-C", rem, "update-ref", f"refs/heads/{p['head']}", nuevo, padre], check=True)
+    p.setdefault("commits_ajenos", []).append(nuevo)
+
+
 def checks(s, p):
+    if en_conflicto(p):
+        return []  # con conflictos GitHub no lanza los workflows de pull_request
     estado = s["ci"].get(p["repo"])
     if not estado:
         return p.get("checks", [])
@@ -239,8 +265,11 @@ def api(s, a):
                 k, v = val.split("=", 1)
                 if k in ("body", "title"):
                     p[k] = v
+        choca = en_conflicto(p)
         return {"number": p["number"], "html_url": p["url"], "state": p["state"].lower(),
-                "title": p["title"], "body": p.get("body", "")}
+                "title": p["title"], "body": p.get("body", ""),
+                "base": {"ref": p["base"]}, "head": {"ref": p["head"], "sha": head_sha(p["repo"], p["head"])},
+                "mergeable": not choca, "mergeable_state": "dirty" if choca else "clean"}
     if "/permission" in sub:
         return {"permission": "admin"}
     raise SystemExit("api no soportada: " + ruta)
@@ -356,6 +385,8 @@ elif a[:2] == ["pr", "list"]:
 elif a[:2] == ["pr", "view"]:
     ref = a[2]
     p = next(p for p in s["prs"] if p["url"] == ref or (str(p["number"]) == ref and p["repo"] == repo_de(a)))
+    if "headRefOid" in (opt(a, "--json") or "") and p.pop("commit_ajeno", False):
+        commit_ajeno(p)  # llega mientras el coordinador espera la CI
     out = {"number": p["number"], "url": p["url"], "state": p["state"], "baseRefName": p["base"],
            "isDraft": p.get("draft", False), "headRefOid": head_sha(p["repo"], p["head"]),
            "mergedAt": "2026-11-22T12:00:00Z" if p.get("merged") else None,

@@ -70,6 +70,15 @@ En proyectos con CI propia (family-finance: job `tests`), el coordinador no ejec
 sube la rama, abre la PR como **borrador** y espera a la CI. Verde → PR lista y tarjeta en Testing / Review.
 Rojo → Bloqueo con el log; «Reintentar con el agente» le pasa el extracto del log del fallo.
 
+- **PR con conflictos con la base**: GitHub no lanza la CI, así que no se espera en vano. En cuanto la API REST
+  da `mergeable: false` (`mergeable_state: dirty`) la tarea se bloquea con «PR con conflictos con <base>» y los
+  archivos en conflicto. `reanudar N --desde agente` rehace la rama sobre la base actualizada (los cambios
+  anteriores quedan en el log y en el prompt, junto con los archivos en conflicto) y la sube con
+  `--force-with-lease`.
+- **Commits ajenos en la rama** (p. ej. el TL resolviendo conflictos): cuenta la CI del HEAD remoto de la PR
+  (`headRefOid`) siempre que descienda del commit del agente. `reanudar N --desde ci` hace antes
+  `git pull --ff-only` de la rama remota en el worktree.
+
 ### El propio equipo como proyecto (`omenorgonza/equipo-ia`)
 
 El código del equipo vive en su propio repositorio y se gestiona como cualquier otro proyecto: tarjetas en
@@ -163,7 +172,7 @@ crea las etiquetas `agent:claude agent:local ready running review blocked` y esc
 | Procesar la cola una vez | `python coordinador.py una-vez` |
 | Consultar estado | `python coordinador.py estado` |
 | Reanudar una issue | `python coordinador.py reanudar 7` (o volver a poner `ready` en GitHub) |
-| Repetir un paso | `python coordinador.py reanudar 7 --desde agente` (`worktree`, `agente`, `verificada`, `commit`, `push`, `pr`) |
+| Repetir un paso | `python coordinador.py reanudar 7 --desde agente` (`worktree`, `agente`, `verificada`, `commit`, `push`, `pr`, `ci`) |
 
 Reglas que aplica el coordinador:
 - Solo issues **abiertas, con `ready`, del autor autorizado y del repo configurado**; las demás se ignoran.

@@ -92,6 +92,82 @@ PY
 grep -q '"pr", "edit"' "$ORIG/coordinador.py" && mal "coordinador.py aún usa gh pr edit" || ok "coordinador.py no usa gh pr edit"
 grep -q "la CI del proyecto falló" "proyectos/demo/estado/prompts/issue-$N.md" && ok "el agente recibió el log del fallo" || mal "log de CI en el prompt"
 
+REM="$FAKE_GH_REMOTOS/demo-app.git"
+subir_a() {  # subir_a <rama> <archivo> <texto>: otra persona sube un commit directamente a GitHub
+  local d; d=$(mktemp -d "$S.clon.XXXXXX")
+  git clone -q --branch "$1" "$REM" "$d/c"
+  mkdir -p "$(dirname "$d/c/$2")"; printf '%s\n' "$3" > "$d/c/$2"
+  git -C "$d/c" add -A && git -C "$d/c" commit -qm "Commit ajeno: $2" && git -C "$d/c" push -q origin "$1"
+  rm -rf "$d"
+}
+nueva_tarea_ci() {  # nueva_tarea_ci <archivo> → número de la issue
+  python3 equipo.py demo tablero nueva "Tarea $1" --agente local --objetivo "Crea el archivo $1 con un título." \
+    --archivo "$1" --criterio "existe $1" --prueba ci --todo | sed -n 's/^#\([0-9]*\) creada.*/\1/p'
+}
+reiniciar_llamadas() {
+  python3 -c "
+import json,os; st=os.environ['FAKE_GH_STATE']; s=json.load(open(st)); s['calls']=[]; json.dump(s, open(st,'w'))"
+}
+
+echo "== 4 ter. PR con conflictos con la base: bloqueo inmediato → reintento desde la base actualizada → verde"
+N1=$(nueva_tarea_ci docs/conflicto.md)
+[ -n "$N1" ] && ok "tarea con conflicto creada (#$N1)" || mal "no se creó la tarea con conflicto"
+python3 equipo.py demo una-vez --detener-tras worktree > "$S.conf0.log" 2>&1 || true
+subir_a main docs/conflicto.md "# Versión que llegó antes a main"   # main avanza y choca con lo que hará el agente
+reiniciar_llamadas
+python3 equipo.py demo una-vez > "$S.conf1.log" 2>&1 || true
+grep -q "PR con conflictos con main" "$S.conf1.log" && ! grep -q "no terminó a tiempo" "$S.conf1.log" \
+  && ok "PR con conflictos bloqueada sin esperar al timeout" || { cat "$S.conf1.log"; mal "PR con conflictos no bloqueada"; }
+N1="$N1" python3 - <<'PY' && ok "bloqueo en menos de dos consultas, con causa, archivos y recuperación" || mal "bloqueo por conflictos incompleto"
+import json, os
+n = os.environ["N1"]; s = json.load(open(os.environ["FAKE_GH_STATE"]))
+pr = [p for p in s["prs"] if p["repo"] == "oscar/demo-app" and p["head"].endswith(f"/issue-{n}")][0]
+vistas = [c for c in s["calls"] if c == f"pr view {pr['number']}"]
+assert 1 <= len(vistas) < 2, s["calls"]
+p = [p for p in s["projects"].values() if p["title"] == "Equipo IA · demo"][0]
+it = [it for it in p["items"].values() if s["issues"].get(it.get("issue", ""), {}).get("number") == int(n)][0]
+b = it["fields"].get("Bloqueo") or ""
+assert "PR con conflictos con main" in b and "docs/conflicto.md" in b and f"reanudar {n} --desde agente" in b, b
+assert "Reintentar con el agente" in b, b
+PY
+python3 equipo.py demo reanudar "$N1" --desde agente > /dev/null
+python3 equipo.py demo una-vez > "$S.conf2.log" 2>&1 || true
+grep -q "CI en verde" "$S.conf2.log" && ok "reintento tras conflictos y CI en verde" || { cat "$S.conf2.log"; mal "reintento tras conflictos"; }
+grep -q "conflictos con \`main\`" "proyectos/demo/estado/prompts/issue-$N1.md" \
+  && grep -A1 "^Archivos en conflicto:" "proyectos/demo/estado/prompts/issue-$N1.md" | grep -q "^- docs/conflicto.md" \
+  && ok "el agente recibió los archivos en conflicto" || mal "archivos en conflicto en el prompt"
+git -C "$REM" merge-base --is-ancestor main "agente/local/issue-$N1" \
+  && ok "la rama de la PR parte de main actualizada" || mal "la rama no parte de main actualizada"
+
+echo "== 4 quater. Commits ajenos en la rama de la PR: cuenta la CI del HEAD remoto; reanudar --desde ci trae la rama"
+N2=$(nueva_tarea_ci docs/ajeno.md)
+[ -n "$N2" ] && ok "tarea con commit ajeno creada (#$N2)" || mal "no se creó la tarea con commit ajeno"
+python3 equipo.py demo una-vez --detener-tras pr > "$S.ajeno0.log" 2>&1 || true
+N2="$N2" python3 - <<'PY'
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+for p in s["prs"]:
+    if p["repo"] == "oscar/demo-app" and p["head"].endswith(f"/issue-{os.environ['N2']}"):
+        p["commit_ajeno"] = True  # fake_gh lo sube a la rama en la primera consulta de la espera de la CI
+json.dump(s, open(st, "w"))
+PY
+python3 equipo.py demo una-vez > "$S.ajeno1.log" 2>&1 || true
+grep -q "commits nuevos" "$S.ajeno1.log" && grep -q "CI en verde" "$S.ajeno1.log" \
+  && ok "commit ajeno durante la espera: cuenta su CI (verde → revisión)" || { cat "$S.ajeno1.log"; mal "commit ajeno durante la espera"; }
+N2="$N2" python3 - <<'PY' && ok "la CI contada es la del commit ajeno" || mal "no se registró la CI del commit ajeno"
+import json, os
+s = json.load(open(os.environ["FAKE_GH_STATE"]))
+pr = [p for p in s["prs"] if p["repo"] == "oscar/demo-app" and p["head"].endswith(f"/issue-{os.environ['N2']}")][0]
+assert pr.get("commits_ajenos") and not pr["draft"], pr
+PY
+subir_a "agente/local/issue-$N2" docs/ajeno.md "# Retoque del TL"
+python3 equipo.py demo reanudar "$N2" --desde ci > /dev/null
+python3 equipo.py demo una-vez > "$S.ajeno2.log" 2>&1 || true
+grep -q "CI en verde" "$S.ajeno2.log" && ok "reanudar --desde ci y CI en verde" || { cat "$S.ajeno2.log"; mal "reanudar --desde ci"; }
+[ "$(git -C "proyectos/demo/worktrees/issue-$N2" rev-parse HEAD)" = "$(git -C "$REM" rev-parse "agente/local/issue-$N2")" ] \
+  && grep -q "Retoque del TL" "proyectos/demo/worktrees/issue-$N2/docs/ajeno.md" \
+  && ok "reanudar --desde ci trajo la rama remota al worktree" || mal "el worktree no tiene la rama remota"
+
 echo "== 4 bis. Vista «Tablero»: columnas por Estado (sin aviso) o por otro campo (aviso con el arreglo)"
 python3 - <<'PY'
 import json, os
