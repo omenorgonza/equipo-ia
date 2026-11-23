@@ -1,0 +1,70 @@
+{
+  "repo": "omenorgonza/equipo-ia",
+  "tablero": {
+    "owner": "omenorgonza",
+    "numero": 5,
+    "owner_tipo": "user"
+  },
+  "rama_objetivo": null,
+  "pruebas_requeridas": [
+    "ensayos"
+  ],
+  "produccion": {
+    "entorno": "produccion-simulada"
+  },
+  "categorias": {
+    "versiones": true,
+    "seguridad": true,
+    "normativa": true,
+    "deuda": true
+  },
+  "versiones": {
+    "archivos": [
+      "repo-plantilla/.python-version",
+      "repo-plantilla/requirements.txt"
+    ],
+    "productos": {
+      "python": "python",
+      "django": "django",
+      "symfony/framework-bundle": "symfony",
+      "react": "react"
+    },
+    "dias_aviso_eol": 180
+  },
+  "normativa": {
+    "fuentes": [
+      {
+        "nombre": "BOE (sumario diario, API de datos abiertos)",
+        "tipo": "boe-sumario",
+        "activa": true,
+        "dias": 7,
+        "palabras": [
+          "protección de datos",
+          "accesibilidad",
+          "inteligencia artificial",
+          "factura electrónica",
+          "ciberseguridad"
+        ],
+        "funcion": "datos personales de usuarios, accesibilidad web y uso de IA",
+        "prioridad": "P3"
+      },
+      {
+        "nombre": "AEPD (notas de prensa, RSS)",
+        "tipo": "rss",
+        "activa": false,
+        "url": "CONFIRMAR_URL_DEL_RSS"
+      },
+      {
+        "nombre": "EUR-Lex (Diario Oficial de la UE, RSS)",
+        "tipo": "rss",
+        "activa": false,
+        "url": "CONFIRMAR_URL_DEL_RSS"
+      }
+    ]
+  },
+  "deuda": {
+    "workflow_pruebas": "ci-equipo.yml",
+    "dias": 14,
+    "dias_pr_bloqueada": 7
+  }
+}
