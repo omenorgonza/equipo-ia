@@ -33,7 +33,8 @@ python3 equipo.py nuevo contestspy --repo contestspy --stack vacio --descripcion
   Toda tarjeta bloqueada tiene **Reanudar** (`coordinador.py reanudar N`: sigue desde el paso pendiente,
   sin volver a llamar al agente si su trabajo ya está hecho); las que fallaron por CI, pruebas o falta de
   cambios tienen además «Reintentar con el agente» (`reanudar N --desde agente`).
-- **Puesta a punto pendiente** (plegable): vistas del tablero, secreto TABLERO_TOKEN, PR de instalación.
+- **Puesta a punto pendiente** (plegable): vistas del tablero, vista «Tablero» con columnas por otro campo
+  que no es Estado (p. ej. Status), secreto TABLERO_TOKEN, PR de instalación.
 - **Una tarjeta por proyecto**: estado del README, resumen, contadores por columna, repos con su CI, tareas en
   curso, enlaces al tablero y botones Arrancar/Parar/Ver log.
 - **Nuevo proyecto**: crea uno o varios repos privados con andamiaje (vacío o Python), el tablero, los
@@ -193,6 +194,11 @@ gh secret set TABLERO_TOKEN --repo <owner/repo>  # token clásico con scopes rep
 python tablero.py verificar                      # campos, vistas, privacidad y permisos con tu identidad
 gh workflow run mantenimiento.yml --repo <owner/repo>   # verifica el acceso del workflow (ver resumen del run)
 ```
+
+`verificar` (y el panel) leen con GraphQL por qué campo agrupa sus columnas la vista «Tablero»
+(`verticalGroupByFields`). Si no es **Estado** (por ejemplo, Status, el campo por defecto de GitHub), lo
+marcan como pendiente: Vista Tablero → Column by → Estado → Save. En el ensayo, el doble `fake_gh.py` lo simula
+con la clave `agrupar` de cada vista (`{"name": "Tablero", "layout": "BOARD_LAYOUT", "agrupar": ["Estado"]}`).
 
 ### Quién mueve cada tarjeta (un único sitio por transición)
 

@@ -140,7 +140,8 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
 
     def vistas():
         t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
-        return [v["name"] for v in t.info()["views"]["nodes"]]
+        info = t.info()
+        return {"nombres": [v["name"] for v in info["views"]["nodes"]], "agrupacion": T.aviso_agrupacion(info)}
 
     if tb.get("numero"):
         its = cacheado(f"items:{nombre}", 60, items, forzar)
@@ -177,11 +178,14 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
             g.sort(key=lambda x: (T.rango_prioridad(x["prioridad"]), x["numero"]))
         salida["tarjetas"] = grupos
         vs = cacheado(f"vistas:{nombre}", 600, vistas, forzar)
-        if isinstance(vs, list):
-            faltan = [v for v in ("Tablero", "Planning") if v not in vs]
+        if isinstance(vs, dict) and "nombres" in vs:
+            faltan = [v for v in (T.VISTA_TABLERO, "Planning") if v not in vs["nombres"]]
             if faltan:
                 salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "url": tb.get("url"),
                                            "texto": f"Crear las vistas del tablero: {', '.join(faltan)}"})
+            if vs.get("agrupacion"):
+                salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "url": tb.get("url"),
+                                           "texto": vs["agrupacion"]})
     else:
         salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "texto": "El proyecto aún no tiene tablero",
                                    "url": None})

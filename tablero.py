@@ -159,9 +159,15 @@ def cmd_verificar(_a) -> None:
     print(f"  {T.CAMPO_BLOQUEO}: {'texto' if T.CAMPO_BLOQUEO in campos else 'NO EXISTE'}")
     vistas = {v["name"]: v["layout"] for v in info["views"]["nodes"]}
     print(f"  Vistas: {vistas}")
+    for v in info["views"]["nodes"]:
+        if v["name"] == T.VISTA_TABLERO:
+            print(f"  Columnas de «{T.VISTA_TABLERO}»: {T.agrupacion_vista(v) or 'sin agrupar'}")
     for nombre, como in VISTAS.items():
         if nombre not in vistas:
             problemas.append(f"Falta la vista «{nombre}» (manual, 1 min): {como}")
+    aviso = T.aviso_agrupacion(info)
+    if aviso:
+        problemas.append(aviso)
     print("\nAcceso con tu identidad local:")
     for r in T.comprobar_acceso(cfg["repo"], t.owner, t.numero, t.owner_tipo, cfg["gh_bin"]):
         print(f"  {'OK   ' if r['ok'] else 'FALTA'} {r['recurso']} [{r['identidad']}]: {r['detalle']}")
