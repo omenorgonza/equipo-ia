@@ -132,6 +132,54 @@ assert aviso('demo') and 'Column by → Estado → Save' in aviso('demo')[0]['te
   && ok "panel: aviso de agrupación solo en el proyecto agrupado por Status" || mal "panel: aviso de agrupación"
 CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PUERTO/api/proyecto/demo/arrancar")
 [ "$CODIGO" = "403" ] && ok "acciones sin token rechazadas" || mal "acción sin token devolvió $CODIGO"
+
+echo "== 5b. Guardar TABLERO_TOKEN desde el panel (tokens falsos; el valor no debe tocar disco ni respuestas)"
+XTOK=$(curl -s "http://127.0.0.1:$PUERTO/" | sed -n 's/.*const TOKEN = "\([^"]*\)".*/\1/p')
+ALEA=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
+TOK_BUENO="ghp_fake_oscar_repo+project_$ALEA"
+TOK_SINPROJ="ghp_fake_oscar_repo_$ALEA"
+TOK_OTRO="ghp_fake_mallory_repo+project_$ALEA"
+TOK_FINO="ghp_fake_oscar_finegrained_$ALEA"
+TOK_MALO="ghp_fake_revocado$ALEA"
+secreto() {  # $1 = token, $2 = fichero de respuesta, $3 = X-Token (opcional)
+  local cab=(-H "Content-Type: application/json")
+  if [ -n "${3:-}" ]; then cab+=(-H "X-Token: $3"); fi
+  printf '{"token":"%s"}' "$1" | curl -s -o "$2" -w '%{http_code}' -X POST "${cab[@]}" \
+    --data-binary @- "http://127.0.0.1:$PUERTO/api/proyecto/demo/secreto"
+}
+tiene_secreto() {
+  python3 -c "
+import json,os,sys; s=json.load(open(os.environ['FAKE_GH_STATE']))
+sys.exit(0 if 'TABLERO_TOKEN' in s.get('secrets',{}).get('oscar/demo-app',[]) else 1)"
+}
+CODIGO=$(secreto "$TOK_BUENO" "$S.secreto.403.json")
+[ "$CODIGO" = "403" ] && ok "guardar secreto sin X-Token: 403" || mal "guardar secreto sin X-Token devolvió $CODIGO"
+for caso in MALO:revocado SINPROJ:permisos OTRO:usuario FINO:clasico; do
+  var="TOK_${caso%%:*}"; etiqueta=${caso#*:}
+  secreto "${!var}" "$S.secreto.$etiqueta.json" "$XTOK" > /dev/null
+  python3 -c "
+import json; r=json.load(open('$S.secreto.$etiqueta.json'))
+assert r['ok'] is False and r['mensaje'] and not r['guardados'], r" \
+    && ! tiene_secreto && ok "token $etiqueta rechazado: $(python3 -c "import json;print(json.load(open('$S.secreto.$etiqueta.json'))['mensaje'])")" \
+    || mal "token $etiqueta no se rechazó o se guardó"
+done
+secreto "$TOK_BUENO" "$S.secreto.ok.json" "$XTOK" > /dev/null
+python3 -c "
+import json; r=json.load(open('$S.secreto.ok.json'))
+assert r['ok'] is True and r['guardados'] == ['oscar/demo-app'] and 'oscar/demo-app' in r['mensaje'], r" \
+  && tiene_secreto && ok "token válido guardado en todos los repos del proyecto" || { cat "$S.secreto.ok.json"; mal "token válido"; }
+python3 -c "
+import hashlib,json,os; s=json.load(open(os.environ['FAKE_GH_STATE']))
+assert s['secretos_sha']['oscar/demo-app:TABLERO_TOKEN'] == hashlib.sha256(b'$TOK_BUENO').hexdigest()" \
+  && ok "el secreto llegó íntegro por stdin" || mal "valor del secreto incorrecto"
+curl -sf "http://127.0.0.1:$PUERTO/api/estado?refrescar=1" | python3 -c "
+import json,sys; d=json.load(sys.stdin); p=[p for p in d['proyectos'] if p['nombre']=='demo'][0]
+assert all(r['secreto'] is True for r in p['repos']), p['repos']" && ok "el panel ve el secreto guardado" || mal "estado del secreto tras guardar"
+FUGAS=""
+for t in "$TOK_BUENO" "$TOK_SINPROJ" "$TOK_OTRO" "$TOK_FINO" "$TOK_MALO" "$ALEA"; do
+  FUGAS+=$(grep -rlF -- "$t" "$S" "$S".* 2>/dev/null || true)
+done
+[ -z "$FUGAS" ] && ok "el token no aparece en logs, estado ni respuestas" || mal "el token aparece en: $FUGAS"
 CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" -d '{"color":"rosa"}' \
   "http://127.0.0.1:$PUERTO/api/proyecto/demo/color")
 [ "$CODIGO" = "403" ] && ok "cambio de color sin token rechazado" || mal "color sin token devolvió $CODIGO"

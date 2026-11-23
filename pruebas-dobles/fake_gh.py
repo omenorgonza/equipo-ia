@@ -91,6 +91,25 @@ def campos_proyecto():
             {"id": "F_Bloqueo", "name": "Bloqueo", "dataType": "TEXT"}]
 
 
+CABECERAS: dict = {}
+
+
+def usuario_del_token():
+    """Sin GH_TOKEN falso: la cuenta de `gh auth`. Con GH_TOKEN=ghp_fake…, tokens con forma ghp_fake_<login>_<scopes+>_<x>
+    (scopes «finegrained» = token de grano fino, sin X-Oauth-Scopes). El token no se guarda en el estado: solo se
+    decodifica su forma, así el ensayo puede comprobar que no aparece en ningún fichero."""
+    tok = os.environ.get("GH_TOKEN") or ""
+    if not tok.startswith("ghp_fake"):  # la CI real puede exportar su propio GH_TOKEN: se ignora
+        return {"login": LOGIN}
+    partes = tok.split("_")
+    if len(partes) != 5 or partes[:2] != ["ghp", "fake"]:
+        print("HTTP 401: Bad credentials (https://api.github.com/user)", file=sys.stderr)
+        sys.exit(1)
+    if partes[3] != "finegrained":
+        CABECERAS["X-Oauth-Scopes"] = ", ".join(x for x in partes[3].split("+") if x)
+    return {"login": partes[2]}
+
+
 def vista_json(v):
     """Vista guardada en el estado → ProjectV2View. `agrupar` (lista de nombres de campo) simula Column by."""
     return {"name": v["name"], "layout": v["layout"],
@@ -170,7 +189,7 @@ def api(s, a):
     if ruta == "graphql":
         return {"data": graphql(s, a)}
     if ruta == "user":
-        return {"login": LOGIN}
+        return usuario_del_token()
     m = re.match(r"repos/([^/]+/[^/?]+)/?(.*)", ruta)
     repo, sub = m.group(1), m.group(2)
     if sub == "":
@@ -250,8 +269,23 @@ if a[:1] == ["api"]:
     out = api(s, a)
     if opt(a, "--jq") and out is not None:
         texto, out = jq(out, opt(a, "--jq")), None
+    if ("--include" in a or "-i" in a) and out is not None:
+        cab = "".join(f"{k}: {v}\n" for k, v in CABECERAS.items())
+        texto, out = f"HTTP/2.0 200 OK\nContent-Type: application/json; charset=utf-8\n{cab}\n{json.dumps(out)}", None
 elif a[:2] == ["auth", "status"]:
     texto = f"github.com\n  ✓ Logged in to github.com account {LOGIN}\n  - Token scopes: 'project', 'repo'"
+elif a[:2] == ["secret", "set"]:
+    if "--body" in a or "-b" in a:
+        print("fake gh: el secreto debe llegar por stdin, no como argumento", file=sys.stderr)
+        sys.exit(3)
+    import hashlib
+    valor = sys.stdin.read()
+    repo = repo_de(a)
+    nombres = s["secrets"].setdefault(repo, [])
+    if a[2] not in nombres:
+        nombres.append(a[2])
+    # Solo la huella: el ensayo comprueba que llegó el valor correcto sin que el valor toque el disco.
+    s.setdefault("secretos_sha", {})[f"{repo}:{a[2]}"] = hashlib.sha256(valor.encode()).hexdigest()
 elif a[:2] in (["label", "create"], ["variable", "set"], ["project", "field-create"]):
     pass
 elif a[:2] == ["project", "link"]:

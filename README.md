@@ -37,6 +37,10 @@ python3 equipo.py nuevo contestspy --repo contestspy --stack vacio --descripcion
   que no es Estado (p. ej. Status), secreto TABLERO_TOKEN, PR de instalación.
 - **Una tarjeta por proyecto**: estado del README, resumen, contadores por columna, repos con su CI, tareas en
   curso, enlaces al tablero y botones Arrancar/Parar/Ver log.
+- **Guardar TABLERO_TOKEN** (botón en cada tarjeta): pegas un token clásico en un campo de contraseña; el panel
+  comprueba con GitHub que es de tu usuario y que tiene los scopes `repo` y `project`, y solo entonces lo guarda
+  con `gh secret set TABLERO_TOKEN` (por stdin) en **todos** los repos del proyecto, indicando en cuáles. El token
+  no se escribe en disco, en logs, en la URL ni en las respuestas; la acción es un POST que exige el token del panel.
 - **Color propio por proyecto**: la tarjeta lleva una franja superior y un fondo suave del color del proyecto, y
   su etiqueta en «Requiere tu atención» usa el mismo color. Se cambia con las 8 muestras de la tarjeta (azul,
   verde, naranja, violeta, turquesa, rosa, ámbar, rojo; legibles en modo claro y oscuro) y se guarda en
@@ -194,7 +198,7 @@ python tablero.py crear                          # Project privado + campos Esta
 python tablero.py migrar                         # SOLO LECTURA: qué pasaría con las etiquetas actuales
 python tablero.py migrar --aplicar               # migra, retira etiquetas de estado y fija fuente_cola=tablero
 python ensayo_tablero.py instalar-github         # sube workflows + .equipo-ia, activa Dependabot, variables
-gh secret set TABLERO_TOKEN --repo <owner/repo>  # token clásico con scopes repo + project (para Actions)
+gh secret set TABLERO_TOKEN --repo <owner/repo>  # token clásico con scopes repo + project (o desde el panel)
 python tablero.py verificar                      # campos, vistas, privacidad y permisos con tu identidad
 gh workflow run mantenimiento.yml --repo <owner/repo>   # verifica el acceso del workflow (ver resumen del run)
 ```
