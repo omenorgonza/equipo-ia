@@ -1,0 +1,85 @@
+{
+  "repo": "TU_USUARIO/equipo-ia-lab-ensayo",
+  "autor_autorizado": "TU_USUARIO",
+  "clon_local": "repo",
+  "rama_por_defecto": null,
+  "intervalo_consulta_s": 60,
+  "max_trabajadores": 5,
+  "max_por_proveedor": 1,
+  "timeout_agente_s": 1500,
+  "timeout_pruebas_s": 300,
+  "espera_reintento_s": 30,
+  "ollama_url": "http://127.0.0.1:11434",
+  "git_bin": [
+    "git"
+  ],
+  "gh_bin": [
+    "gh"
+  ],
+  "agentes": {
+    "claude": {
+      "etiqueta": "agent:claude",
+      "proveedor": "anthropic",
+      "bin": [
+        "claude"
+      ],
+      "args": [
+        "-p",
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "acceptEdits",
+        "--allowedTools",
+        "Read,Edit,Write,Glob,Grep"
+      ]
+    },
+    "local": {
+      "etiqueta": "agent:local",
+      "proveedor": "ollama",
+      "bin": [
+        "opencode"
+      ],
+      "modelo": "ollama/RELLENAR_CON_configurar-local",
+      "args_extra": [
+        "--auto",
+        "--agent",
+        "build"
+      ]
+    }
+  },
+  "pruebas": {
+    "import-src": [
+      "{python}",
+      "-c",
+      "import src.puntos as m; assert callable(m.sumar_puntos); print('import OK')"
+    ],
+    "sintaxis-tests": [
+      "{python}",
+      "-m",
+      "py_compile",
+      "tests/test_puntos.py"
+    ],
+    "unit": [
+      "{python}",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-t",
+      ".",
+      "-v"
+    ],
+    "docs-notas": [
+      "{python}",
+      "-c",
+      "import pathlib; assert pathlib.Path('docs/notas-ensayo.md').read_text(encoding='utf-8').startswith('# '); print('docs OK')"
+    ],
+    "docs-tarea": [
+      "{python}",
+      "-c",
+      "import glob,sys; sys.exit(0 if glob.glob('docs/*.md') else 1)"
+    ]
+  },
+  "contexto_minimo_local": 16384
+}

@@ -1,0 +1,67 @@
+name: despliegue
+# Solo se dispara a mano (o, en el futuro, desde el proceso real de publicación).
+# Mover una tarjeta del tablero NUNCA dispara este workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Rama, tag o SHA a desplegar
+        default: main
+      resultado:
+        description: Resultado del despliegue SIMULADO
+        type: choice
+        options: [success, failure]
+        default: success
+permissions:
+  contents: read
+  deployments: write
+env:
+  ENTORNO: produccion-simulada
+jobs:
+  desplegar:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Registrar despliegue (SIMULADO)
+        id: dep
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id=$(jq -n --arg ref "${{ steps.sha.outputs.sha }}" --arg env "$ENTORNO" \
+            '{ref:$ref, environment:$env, auto_merge:false, required_contexts:[], description:"SIMULADO: no hay producción real"}' \
+            | gh api "repos/${{ github.repository }}/deployments" --input - --jq .id)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+      - name: Desplegar (simulado)
+        run: |
+          echo "Aquí iría el despliegue real. Resultado simulado: ${{ inputs.resultado }}"
+          test "${{ inputs.resultado }}" = "success"
+      - name: Estado del despliegue
+        if: always() && steps.dep.outputs.id
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          estado=$([ "${{ job.status }}" = "success" ] && echo success || echo failure)
+          gh api "repos/${{ github.repository }}/deployments/${{ steps.dep.outputs.id }}/statuses" \
+            -f state="$estado" -f log_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -f description="SIMULADO" >/dev/null
+          echo "Despliegue ${{ steps.dep.outputs.id }} → $estado" >> "$GITHUB_STEP_SUMMARY"
+  sincronizar-pro:
+    needs: desplegar
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reconciliar PRO con el último despliegue correcto
+        env:
+          GH_TOKEN: ${{ secrets.TABLERO_TOKEN }}
+          TABLERO_OWNER: ${{ vars.TABLERO_OWNER }}
+          TABLERO_NUMERO: ${{ vars.TABLERO_NUMERO }}
+        run: python .equipo-ia/sincronizar.py produccion

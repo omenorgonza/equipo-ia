@@ -1,0 +1,3 @@
+# Dependencia de ejemplo para que Dependabot vigile pip en los repos del equipo.
+# El código del piloto no la importa. (En el ensayo se fijó 2.31.0 para provocar alertas reales; ya cumplido.)
+requests==2.34.2

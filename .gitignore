@@ -1,0 +1,16 @@
+# Configuración y datos locales: nunca al repositorio
+config.json
+config.json.*
+equipo.json
+opencode.json
+proyectos/
+estado/
+worktrees/
+repo/
+.opencode/
+__pycache__/
+*.pyc
+*.log
+comprobar-wsl.sh
+instalar-wsl.sh
+arreglar-path.sh

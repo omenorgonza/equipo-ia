@@ -1,0 +1,20 @@
+name: pruebas
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - name: Sintaxis
+        run: python -m compileall -q src tests .equipo-ia
+      - name: Pruebas unitarias
+        run: |
+          if ls tests/test_*.py >/dev/null 2>&1; then python -m unittest discover -s tests -t . -v; else echo "Sin pruebas todavía"; fi

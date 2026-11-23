@@ -1,0 +1,20 @@
+name: aviso-critico
+# Ensayo del aviso inmediato. El aviso real lo envía Dependabot desde su detección; esto lo verifica y lo simula.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  ensayo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verificar destinatario, canal y configuración y enviar un aviso SIMULADO
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ADMIN_TOKEN: ${{ secrets.TABLERO_TOKEN }}
+          DESTINATARIO: ${{ vars.TABLERO_OWNER }}
+        run: |
+          gh label create simulado --color C5DEF5 --force --repo "$GITHUB_REPOSITORY" || true
+          python .equipo-ia/aviso_critico.py

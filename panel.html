@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Equipo IA · Panel</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --card: #ffffff; --ink: #1f1e1c; --muted: #6b6a65; --line: #e4e2db;
+    --accent: #c4553a; --accent-ink: #ffffff; --ok: #2f7d55; --warn: #b7791f; --bad: #b3362b;
+    --chip: #efede6; --hi: #fff4ee; --mid: #fbf6e8;
+    --radius: 12px; font-synthesis: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #171614; --card: #201f1c; --ink: #ecebe6; --muted: #a3a19a; --line: #34322e;
+            --accent: #e0775c; --chip: #2a2925; --hi: #2e211c; --mid: #2b2719; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 18px 28px; border-bottom: 1px solid var(--line);
+           position: sticky; top: 0; background: var(--bg); z-index: 2; flex-wrap: wrap; }
+  header h1 { font-size: 19px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  header .sp { flex: 1; }
+  main { max-width: 1240px; margin: 0 auto; padding: 22px 28px 60px; }
+  button, .btn { font: inherit; font-size: 14px; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+           padding: 7px 13px; border-radius: 8px; cursor: pointer; text-decoration: none; display: inline-flex;
+           align-items: center; gap: 6px; }
+  button:hover, .btn:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button:disabled { opacity: .5; cursor: default; }
+  h2 { font-size: 15px; font-weight: 600; margin: 26px 0 10px; text-transform: none; }
+  .atencion { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .at { display: flex; gap: 10px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--line); }
+  .at:first-child { border-top: 0; }
+  .at.alta { background: var(--hi); }
+  .at .p { font-size: 12px; background: var(--chip); padding: 2px 8px; border-radius: 99px; white-space: nowrap; }
+  .at .t { flex: 1; }
+  .at a { color: inherit; }
+  .vacio { color: var(--muted); padding: 14px 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px;
+          display: flex; flex-direction: column; gap: 12px; }
+  .card.foco { border-color: var(--accent); }
+  .top { display: flex; align-items: center; gap: 10px; }
+  .top h3 { margin: 0; font-size: 17px; font-weight: 600; flex: 1; }
+  .pill { font-size: 12px; padding: 3px 9px; border-radius: 99px; background: var(--chip); color: var(--muted); }
+  .pill.on { color: var(--ok); }
+  .pill.on::before { content: "●"; margin-right: 5px; }
+  .pill.off::before { content: "○"; margin-right: 5px; }
+  .desc { color: var(--muted); font-size: 14px; margin: 0; }
+  .estado { font-size: 13px; background: var(--mid); padding: 6px 10px; border-radius: 8px; }
+  .cols { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .col { background: var(--chip); border-radius: 8px; padding: 6px 4px; text-align: center; }
+  .col b { display: block; font-size: 17px; font-weight: 600; }
+  .col span { font-size: 10.5px; color: var(--muted); display: block; line-height: 1.2; }
+  .col.hot { background: var(--hi); outline: 1px solid var(--accent); }
+  .repos { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  .repo { display: flex; gap: 8px; align-items: center; }
+  .repo a { color: inherit; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.success { background: var(--ok); } .dot.failure { background: var(--bad); }
+  .acciones { display: flex; gap: 8px; flex-wrap: wrap; }
+  .mini { font-size: 13px; padding: 5px 10px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .tarj { font-size: 13px; padding: 4px 0; border-top: 1px dashed var(--line); display: flex; gap: 6px; }
+  .tarj a { color: inherit; } .tarj .pr { color: var(--muted); }
+  pre { background: var(--chip); padding: 12px; border-radius: 8px; font-size: 12px; overflow: auto; max-height: 340px;
+        white-space: pre-wrap; margin: 0; }
+  .form { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px;
+          display: grid; gap: 12px; max-width: 720px; }
+  label { font-size: 13px; color: var(--muted); display: grid; gap: 4px; }
+  input, select, textarea { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+                            background: var(--bg); color: var(--ink); }
+  .repolist { max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
+  .repolist label { flex-direction: row; display: flex; gap: 8px; align-items: center; color: var(--ink); font-size: 14px; }
+  .hint { font-size: 12.5px; color: var(--muted); margin: 0; }
+  .toast { position: sticky; bottom: 16px; margin-top: 16px; background: var(--ink); color: var(--bg);
+           padding: 10px 14px; border-radius: 10px; display: none; width: fit-content; }
+  [hidden] { display: none !important; }
+  main a { color: var(--accent); }
+  .at a, .repo a, .tarj a { color: inherit; }
+  .puesta { margin-top: 10px; }
+  .puesta summary { padding: 8px 2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Equipo IA</h1>
+  <span class="sub" id="gen">cargando…</span>
+  <span class="sp"></span>
+  <button onclick="cargar(true)">Actualizar</button>
+  <button onclick="mostrar('importar')">Añadir proyecto existente</button>
+  <button class="primary" onclick="mostrar('nuevo')">Nuevo proyecto</button>
+</header>
+<main>
+  <section id="f-nuevo" hidden>
+    <h2>Nuevo proyecto</h2>
+    <div class="form">
+      <label>Nombre del proyecto <input id="n-nombre" placeholder="mi-proyecto" pattern="[a-z0-9-]+"></label>
+      <label>Repositorios nuevos (uno por línea; el primero es el principal)
+        <textarea id="n-repos" rows="3" placeholder="mi-proyecto-api&#10;mi-proyecto-web"></textarea></label>
+      <label>Stack inicial
+        <select id="n-stack"><option value="vacio">Vacío (la primera tarea define el stack)</option>
+          <option value="python">Python (unittest)</option></select></label>
+      <label>Descripción <input id="n-desc" placeholder="Qué es y para quién"></label>
+      <p class="hint">Crea los repos privados, el tablero, los workflows y la configuración del equipo. Después solo
+        tendrás que guardar el secreto TABLERO_TOKEN y crear las dos vistas del tablero.</p>
+      <div class="acciones"><button class="primary" onclick="crear(true)">Crear proyecto</button>
+        <button onclick="mostrar(null)">Cancelar</button></div>
+    </div>
+  </section>
+  <section id="f-importar" hidden>
+    <h2>Añadir proyecto existente</h2>
+    <div class="form">
+      <label>Nombre del proyecto <input id="i-nombre" placeholder="family-finance"></label>
+      <label>Repositorios (marca uno o varios; el primero marcado es el principal)</label>
+      <div class="repolist" id="i-repos">cargando repositorios…</div>
+      <label>Descripción <input id="i-desc"></label>
+      <p class="hint">No toca tu código: detecta la CI de cada repo y abre una PR con la instalación para que la revises.</p>
+      <div class="acciones"><button class="primary" onclick="crear(false)">Añadir proyecto</button>
+        <button onclick="mostrar(null)">Cancelar</button></div>
+    </div>
+  </section>
+  <section id="trabajo" hidden>
+    <h2 id="trabajo-t">Trabajo</h2>
+    <pre id="trabajo-log"></pre>
+  </section>
+
+  <h2>Requiere tu atención</h2>
+  <div class="atencion" id="atencion"><div class="vacio">Cargando…</div></div>
+  <details class="puesta" id="puesta" hidden><summary id="puesta-t">Puesta a punto pendiente</summary>
+    <div class="atencion" id="puesta-l"></div></details>
+
+  <h2>Proyectos</h2>
+  <div class="grid" id="proyectos"></div>
+  <section id="logbox" hidden><h2 id="log-t">Log</h2><pre id="log-pre"></pre></section>
+  <div class="toast" id="toast"></div>
+</main>
+<script>
+const TOKEN = "__TOKEN__";
+const COLS = ["Backlog","Planning","To Do","Doing","Testing / Review","Done","PRO"];
+const CORTO = {"Testing / Review": "Review"};
+let datos = null, orden = [];
+
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function toast(m) { const t = document.getElementById("toast"); t.textContent = m; t.style.display = "block";
+  clearTimeout(window._tt); window._tt = setTimeout(() => t.style.display = "none", 4000); }
+async function post(url, cuerpo) {
+  const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json", "X-Token": TOKEN},
+                             body: JSON.stringify(cuerpo || {})});
+  return r.json();
+}
+
+async function cargar(forzar) {
+  document.getElementById("gen").textContent = "actualizando…";
+  const r = await fetch("/api/estado" + (forzar ? "?refrescar=1" : ""));
+  datos = await r.json();
+  pintar();
+}
+
+function pintar() {
+  const ps = datos.proyectos;
+  document.getElementById("gen").textContent = `${ps.length} proyecto(s) · ${datos.generado.slice(11,16)}`;
+  const at = [];
+  ps.forEach(p => p.atencion.forEach(a => at.push({...a, proyecto: p.nombre})));
+  at.sort((a, b) => (a.nivel === b.nivel ? 0 : a.nivel === "alta" ? -1 : 1));
+  const fila = a => `
+    <div class="at ${a.nivel}"><span class="p">${esc(a.proyecto)}</span>
+      <span class="t">${a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.texto)}</a>` : esc(a.texto)}</span>
+    </div>`;
+  const puesta = at.filter(a => a.tipo === "instalacion");
+  document.getElementById("puesta").hidden = !puesta.length;
+  document.getElementById("puesta-t").textContent = `Puesta a punto pendiente (${puesta.length})`;
+  document.getElementById("puesta-l").innerHTML = puesta.map(fila).join("");
+  const urgente = at.filter(a => a.tipo !== "instalacion");
+  document.getElementById("atencion").innerHTML = urgente.length ? urgente.map(a => `
+    <div class="at ${a.nivel}"><span class="p">${esc(a.proyecto)}</span>
+      <span class="t">${a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.texto)}</a>` : esc(a.texto)}</span>
+      ${a.reintentar ? `<button class="mini" onclick="reintentar('${a.proyecto}', ${a.numero})">Reintentar con el agente</button>` : ""}
+    </div>`).join("") : `<div class="vacio">Nada urgente. El equipo puede seguir solo. 🎉</div>`;
+
+  ps.sort((a, b) => b.atencion.filter(x => x.nivel === "alta").length - a.atencion.filter(x => x.nivel === "alta").length
+                    || a.nombre.localeCompare(b.nombre));
+  document.getElementById("proyectos").innerHTML = ps.map(p => {
+    const altas = p.atencion.filter(a => a.nivel === "alta").length;
+    const rd = (p.repos[0] || {}).readme || {};
+    const activas = ["Testing / Review", "Doing", "To Do"].flatMap(e => (p.tarjetas[e] || []).map(t => ({...t, e})));
+    return `<article class="card ${altas ? "foco" : ""}">
+      <div class="top"><h3>${esc(p.nombre)}</h3>
+        <span class="pill ${p.activo ? "on" : "off"}">${p.activo ? "Equipo trabajando" : "Equipo parado"}</span></div>
+      ${p.descripcion ? `<p class="desc">${esc(p.descripcion)}</p>` : ""}
+      ${rd.estado ? `<div class="estado">${esc(rd.estado)}</div>` : ""}
+      ${rd.resumen ? `<p class="desc">${esc(rd.resumen)} <a href="${esc(rd.url)}" target="_blank" rel="noopener">README</a></p>` : ""}
+      ${p.error ? `<div class="estado">Tablero: ${esc(p.error)}</div>` : ""}
+      <div class="cols">${COLS.map(c => `<div class="col ${c === "Testing / Review" && p.columnas[c] ? "hot" : ""}">
+        <b>${p.columnas[c] || 0}</b><span>${CORTO[c] || c}</span></div>`).join("")}</div>
+      <div class="repos">${p.repos.map(r => {
+        const al = (r.alertas || {}).total, ci = (r.ci || {}).conclusion;
+        return `<div class="repo"><span class="dot ${ci || ""}" title="CI ${esc(ci || "sin datos")}"></span>
+          <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.repo)}</a>
+          <span class="pr">${r.rama}${al ? ` · ${al} aviso(s)` : ""}</span></div>`; }).join("")}</div>
+      ${activas.length ? `<details><summary>${activas.length} tarea(s) en curso o pendientes</summary>
+        ${activas.map(t => `<div class="tarj"><span>${esc(CORTO[t.e] || t.e)}</span>
+          <a href="${esc(t.pr || t.url)}" target="_blank" rel="noopener">#${t.numero} ${esc(t.titulo)}</a>
+          <span class="pr">${esc((t.prioridad || "").slice(0,2))} ${esc(t.agente || "")}</span></div>`).join("")}</details>` : ""}
+      <div class="acciones">
+        ${p.tablero ? `<a class="btn mini" href="${esc(p.tablero)}" target="_blank" rel="noopener">Abrir tablero ↗</a>` : ""}
+        ${p.activo ? `<button class="mini" onclick="accion('${p.nombre}','parar')">Parar equipo</button>`
+                   : `<button class="mini primary" onclick="accion('${p.nombre}','arrancar')">Arrancar equipo</button>`}
+        <button class="mini" onclick="verLog('${p.nombre}')">Ver log</button>
+      </div></article>`; }).join("") || `<div class="vacio">Aún no hay proyectos. Usa «Nuevo proyecto» o «Añadir proyecto existente».</div>`;
+}
+
+async function accion(p, a) { const r = await post(`/api/proyecto/${p}/${a}`); toast(r.mensaje || r.error); setTimeout(() => cargar(), 1200); }
+async function reintentar(p, n) { const r = await post(`/api/proyecto/${p}/reintentar`, {numero: n}); toast(r.ok ? `#${n} vuelve a To Do para el agente` : r.mensaje); setTimeout(() => cargar(true), 1500); }
+async function verLog(p) { const r = await (await fetch(`/api/proyecto/${p}/log`)).json();
+  document.getElementById("logbox").hidden = false; document.getElementById("log-t").textContent = `Log del equipo · ${p}`;
+  document.getElementById("log-pre").textContent = r.log; document.getElementById("logbox").scrollIntoView({behavior: "smooth"}); }
+
+async function mostrar(cual) {
+  document.getElementById("f-nuevo").hidden = cual !== "nuevo";
+  document.getElementById("f-importar").hidden = cual !== "importar";
+  if (cual === "importar") {
+    orden = [];
+    const repos = await (await fetch("/api/repos")).json();
+    document.getElementById("i-repos").innerHTML = repos.map(r => `<label><input type="checkbox" value="${esc(r.nameWithOwner)}"
+      onchange="marcar(this)"> ${esc(r.nameWithOwner)} <span class="hint">${esc(r.description || "")}</span></label>`).join("")
+      || "No quedan repositorios sin proyecto.";
+  }
+  if (cual) window.scrollTo({top: 0, behavior: "smooth"});
+}
+function marcar(cb) { if (cb.checked) orden.push(cb.value); else orden = orden.filter(x => x !== cb.value);
+  if (!document.getElementById("i-nombre").value && orden.length) document.getElementById("i-nombre").value = orden[0].split("/")[1].toLowerCase(); }
+
+async function crear(nuevo) {
+  const cuerpo = nuevo
+    ? {nombre: document.getElementById("n-nombre").value.trim(), stack: document.getElementById("n-stack").value,
+       repos: document.getElementById("n-repos").value.split("\n"), descripcion: document.getElementById("n-desc").value}
+    : {nombre: document.getElementById("i-nombre").value.trim(), repos: orden, descripcion: document.getElementById("i-desc").value};
+  if (!cuerpo.nombre || !cuerpo.repos.filter(x => x.trim()).length) return toast("Falta el nombre o algún repositorio");
+  const r = await post(nuevo ? "/api/proyectos/nuevo" : "/api/proyectos/importar", cuerpo);
+  if (r.error) return toast(r.error);
+  mostrar(null); seguir(r.trabajo);
+}
+async function seguir(id) {
+  const box = document.getElementById("trabajo"); box.hidden = false;
+  const t = await (await fetch(`/api/trabajos/${id}`)).json();
+  document.getElementById("trabajo-t").textContent = `${t.titulo} · ${t.estado}`;
+  document.getElementById("trabajo-log").textContent = t.lineas.join("\n");
+  if (t.estado === "en curso") setTimeout(() => seguir(id), 1500); else cargar(true);
+}
+
+cargar(false);
+setInterval(() => cargar(false), 60000);
+</script>
+</body>
+</html>

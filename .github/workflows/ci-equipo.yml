@@ -1,0 +1,22 @@
+name: ci-equipo
+# Juez de cada PR del propio equipo: ensayo completo contra el GitHub simulado (sin red ni credenciales).
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  ensayos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Ensayo completo del equipo
+        run: bash pruebas-dobles/ensayo_completo.sh /tmp/sim-ci

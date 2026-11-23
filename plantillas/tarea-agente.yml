@@ -1,0 +1,57 @@
+name: Tarea para agente
+description: Tarea preparada por el Team Leader para un desarrollador IA
+title: "[tarea] "
+labels: ["ready"]
+body:
+  - type: textarea
+    id: objetivo
+    attributes:
+      label: Objetivo
+      description: Qué hay que conseguir, con el contrato (nombre, firma, ubicación, errores).
+    validations:
+      required: true
+  - type: dropdown
+    id: agente
+    attributes:
+      label: Agente
+      description: Debe coincidir con la etiqueta agent:claude o agent:local.
+      options: [claude, local]
+    validations:
+      required: true
+  - type: input
+    id: rama_base
+    attributes:
+      label: Rama base
+      placeholder: main
+    validations:
+      required: true
+  - type: input
+    id: commit_base
+    attributes:
+      label: Commit base
+      description: Opcional. SHA desde el que crear la rama; si falta, se usa la punta de la rama base.
+  - type: textarea
+    id: archivos
+    attributes:
+      label: Archivos permitidos
+      description: Un patrón por línea (p. ej. src/*.py). Cualquier otro cambio bloquea la tarea.
+    validations:
+      required: true
+  - type: textarea
+    id: criterios
+    attributes:
+      label: Criterios de aceptación
+    validations:
+      required: true
+  - type: input
+    id: prueba
+    attributes:
+      label: Comando de prueba
+      description: Clave definida en config.json → pruebas (import-src, sintaxis-tests, unit).
+    validations:
+      required: true
+  - type: textarea
+    id: dependencias
+    attributes:
+      label: Dependencias
+      description: Issues previas como #12, o "ninguna".
