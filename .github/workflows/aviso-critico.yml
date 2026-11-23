@@ -9,7 +9,7 @@ jobs:
   ensayo:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Verificar destinatario, canal y configuración y enviar un aviso SIMULADO
         env:
           GH_TOKEN: ${{ github.token }}
