@@ -37,6 +37,10 @@ python3 equipo.py nuevo contestspy --repo contestspy --stack vacio --descripcion
   que no es Estado (p. ej. Status), secreto TABLERO_TOKEN, PR de instalación.
 - **Una tarjeta por proyecto**: estado del README, resumen, contadores por columna, repos con su CI, tareas en
   curso, enlaces al tablero y botones Arrancar/Parar/Ver log.
+- **Color propio por proyecto**: la tarjeta lleva una franja superior y un fondo suave del color del proyecto, y
+  su etiqueta en «Requiere tu atención» usa el mismo color. Se cambia con las 8 muestras de la tarjeta (azul,
+  verde, naranja, violeta, turquesa, rosa, ámbar, rojo; legibles en modo claro y oscuro) y se guarda en
+  `proyectos/<p>/config.json` (clave `color`). `nuevo`/`importar`/`migrar` asignan el primero libre de la paleta.
 - **Nuevo proyecto**: crea uno o varios repos privados con andamiaje (vacío o Python), el tablero, los
   workflows y la configuración. **Añadir proyecto existente**: no toca tu código; detecta la CI y abre una PR
   con la instalación.

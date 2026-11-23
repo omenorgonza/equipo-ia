@@ -37,6 +37,13 @@ python3 equipo.py nuevo demo --repo demo-app --stack python --descripcion "Proye
 python3 -c "import json;c=json.load(open('proyectos/demo/config.json'));assert c['ci']['checks']==['pruebas'];assert c['fuente_cola']=='tablero'" \
   && ok "config del proyecto nuevo" || mal "config del proyecto nuevo"
 python3 -c "
+import json; import equipo as E
+c=json.load(open('proyectos/demo/config.json')); e=json.load(open('proyectos/ensayo/config.json'))
+assert c.get('color') in E.PALETA and e.get('color') in E.PALETA, (c.get('color'), e.get('color'))
+assert c['color'] != e['color'], 'dos proyectos con el mismo color por defecto'
+h=open('panel.html').read(); assert len(E.PALETA) == 8 and all('.c-'+x in h for x in E.PALETA)" \
+  && ok "color por defecto de los proyectos (paleta de 8)" || mal "color por defecto"
+python3 -c "
 import json,os; s=json.load(open(os.environ['FAKE_GH_STATE']))
 p=[p for p in s['projects'].values() if p['title']=='Equipo IA · demo'][0]
 assert p.get('copiado_de'), 'el tablero no se copió de la plantilla'" && ok "tablero copiado de la plantilla" || mal "plantilla del tablero"
@@ -125,6 +132,19 @@ assert aviso('demo') and 'Column by → Estado → Save' in aviso('demo')[0]['te
   && ok "panel: aviso de agrupación solo en el proyecto agrupado por Status" || mal "panel: aviso de agrupación"
 CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PUERTO/api/proyecto/demo/arrancar")
 [ "$CODIGO" = "403" ] && ok "acciones sin token rechazadas" || mal "acción sin token devolvió $CODIGO"
+CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" -d '{"color":"rosa"}' \
+  "http://127.0.0.1:$PUERTO/api/proyecto/demo/color")
+[ "$CODIGO" = "403" ] && ok "cambio de color sin token rechazado" || mal "color sin token devolvió $CODIGO"
+TOKEN=$(curl -sf "http://127.0.0.1:$PUERTO/" | sed -n 's/^const TOKEN = "\([^"]*\)";.*/\1/p')
+CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" -H "X-Token: $TOKEN" \
+  -d '{"color":"no-existe"}' "http://127.0.0.1:$PUERTO/api/proyecto/demo/color")
+[ "$CODIGO" = "400" ] && ok "color fuera de la paleta rechazado" || mal "color no válido devolvió $CODIGO"
+curl -sf -X POST -H "Content-Type: application/json" -H "X-Token: $TOKEN" -d '{"color":"rosa"}' \
+  "http://127.0.0.1:$PUERTO/api/proyecto/demo/color" > /dev/null \
+  && python3 -c "import json;assert json.load(open('proyectos/demo/config.json'))['color']=='rosa'" \
+  && curl -sf "http://127.0.0.1:$PUERTO/api/estado" | python3 -c "
+import json,sys; d=json.load(sys.stdin); assert [p['color'] for p in d['proyectos'] if p['nombre']=='demo']==['rosa']" \
+  && ok "color guardado con token en config.json" || mal "color con token no se guardó"
 CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"numero": 1}' "http://127.0.0.1:$PUERTO/api/proyecto/demo/reanudar")
 [ "$CODIGO" = "403" ] && ok "reanudar sin token rechazado" || mal "reanudar sin token devolvió $CODIGO"
 kill $PANEL 2>/dev/null || true

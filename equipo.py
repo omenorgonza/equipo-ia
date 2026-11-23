@@ -36,6 +36,9 @@ NOMBRE_OK = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 REPO_OK = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 NUESTROS_WORKFLOWS = ("tablero-pr.yml", "tablero-issue.yml", "mantenimiento.yml", "despliegue.yml", "aviso-critico.yml")
 STACKS = ("python", "vacio")
+# Colores de proyecto para el panel (clave «color» en proyectos/<p>/config.json). panel.html define cada uno
+# con la clase .c-<nombre> en modo claro y oscuro; si añades uno aquí, añádelo también allí.
+PALETA = ("azul", "verde", "naranja", "violeta", "turquesa", "rosa", "ambar", "rojo")
 
 
 # --------------------------------------------------------------------------- utilidades
@@ -91,6 +94,26 @@ def guardar_cfg_proyecto(nombre: str, cambios: dict) -> None:
     cfg.update(cambios)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def color_guardado(nombre: str) -> str | None:
+    p = PROYECTOS / nombre / "config.json"
+    try:
+        c = json.loads(p.read_text(encoding="utf-8")).get("color")
+    except (OSError, ValueError):
+        return None
+    return c if c in PALETA else None
+
+
+def color_proyecto(nombre: str) -> str:
+    """Color del proyecto: el guardado o, si no tiene, uno fijo derivado del nombre (no cambia entre cargas)."""
+    return color_guardado(nombre) or PALETA[sum(map(ord, nombre)) % len(PALETA)]
+
+
+def color_por_defecto(nombre: str) -> str:
+    """Color para un proyecto nuevo: el primero de la paleta que no usa ningún otro proyecto."""
+    usados = {color_guardado(p) for p in proyectos() if p != nombre}
+    return next((c for c in PALETA if c not in usados), PALETA[sum(map(ord, nombre)) % len(PALETA)])
 
 
 def env_proyecto(nombre: str) -> dict:
@@ -355,7 +378,7 @@ def crear_proyecto(nombre: str, repos: list[str], crear_repos: bool, stack: str,
         git("clone", f"https://github.com/{principal}.git", str(clon), cwd=LAB)
     guardar_cfg_proyecto(nombre, {"repo": principal, "repos": completos, "descripcion": descripcion,
                                   "autor_autorizado": yo, "autores_autorizados": [yo], "clon_local": "repo",
-                                  "fuente_cola": "tablero", "stack": stack})
+                                  "fuente_cola": "tablero", "stack": stack, "color": color_por_defecto(nombre)})
 
     log("Creando el tablero del proyecto")
     plantilla = plantilla_tablero()
@@ -428,6 +451,7 @@ def migrar(nombre: str = "ensayo") -> None:
     compartido["pruebas_comunes"] = {}
     propio = {k: v for k, v in cfg.items() if k not in C.CLAVES_COMPARTIDAS}
     propio.setdefault("repos", [propio.get("repo")])
+    propio.setdefault("color", color_por_defecto(nombre))
     pd.mkdir(parents=True, exist_ok=True)
     viejo_estado, viejo_wt = (LAB / "estado").resolve(), (LAB / "worktrees").resolve()
     for d in ("estado", "worktrees", propio.get("clon_local", "repo")):
