@@ -154,7 +154,7 @@ def cmd_instalar_github(_a) -> None:
     c["pruebas"]["docs-tarea"] = ["{python}", "-c", "import glob,sys; sys.exit(0 if glob.glob('docs/*.md') else 1)"]
     c.setdefault("autores_autorizados", [c.get("autor_autorizado", "")])
     p.write_text(json.dumps(c, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print("Instalado en GitHub: workflows pruebas, tablero-pr, mantenimiento, despliegue, aviso-critico; dependabot.yml.")
+    print("Instalado en GitHub: workflows pruebas, tablero-pr, tablero-issue, mantenimiento, despliegue, aviso-critico; dependabot.yml.")
 
 
 # --------------------------------------------------------------------------- ensayos
@@ -173,6 +173,28 @@ def cmd_prioridad(_a) -> None:
     anotar("prioridad", "verificado" if not cfg.get("simular_actions") else "simulado",
            paso1 and e2b == T.REVIEW and e0b == T.BACKLOG and not tocada,
            f"1.ª pasada: P1 #{p1}={e1}, P2 #{p2}={e2}, P0 #{p0}={e0}; 2.ª: P2={e2b}, P0={e0b}; P0 en registro={tocada}")
+
+
+def cmd_issue_al_tablero(_a) -> None:
+    """Issue creada fuera del tablero → tablero-issue.yml la pone en Planning con su prioridad; si ya está colocada, no la toca."""
+    cfg, t = cfg_y_tablero()
+    cuerpo = "Issue creada sin pasar por el tablero (móvil u otra sesión)."
+    suelta = int(gh(cfg, "issue", "create", "--repo", cfg["repo"], "--title", "Issue suelta (al tablero)",
+                    "--label", "prioridad:p1", "--body-file", "-", stdin_text=cuerpo).strip().rstrip("/").split("/")[-1])
+    colocada = tarea(cfg, t, "Issue ya colocada en To Do", "local", T.TODO, "P3", "docs/colocada.md")
+    simulado = bool(cfg.get("simular_actions"))
+    if simulado:
+        for n in (suelta, colocada):
+            accion(cfg, "tablero-issue.yml", ["sincronizar.py", "issue-abierta", "--issue", str(n), "--espera", "0"])
+    for _ in range(1 if simulado else 24):  # en real, el workflow se dispara solo al abrir la issue
+        a = item(t, cfg, suelta)
+        if a.get("estado"):
+            break
+        time.sleep(5)
+    a, b = item(t, cfg, suelta), item(t, cfg, colocada)
+    anotar("issue-al-tablero", "simulado" if simulado else "verificado",
+           a.get("estado") == T.PLANNING and a.get("prioridad") == "P1 alta" and b.get("estado") == T.TODO,
+           f"suelta #{suelta}: {a.get('estado')}/{a.get('prioridad')}; colocada #{colocada}: {b.get('estado')}")
 
 
 def cmd_bloqueo(_a) -> None:
@@ -375,7 +397,7 @@ def simular_merge(cfg, f) -> None:
 
 
 def cmd_todos(a) -> None:
-    for fn in (cmd_prioridad, cmd_bloqueo, cmd_reinicio, cmd_aviso_duplicado, cmd_aviso_critico, cmd_remoto, cmd_pro):
+    for fn in (cmd_prioridad, cmd_issue_al_tablero, cmd_bloqueo, cmd_reinicio, cmd_aviso_duplicado, cmd_aviso_critico, cmd_remoto, cmd_pro):
         fn(a)
     print("\nResumen:")
     for k, v in json.loads(RES.read_text(encoding="utf-8")).items():
@@ -385,7 +407,8 @@ def cmd_todos(a) -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = p.add_subparsers(dest="cmd", required=True)
-    for nombre, fn in [("instalar-github", cmd_instalar_github), ("prioridad", cmd_prioridad), ("bloqueo", cmd_bloqueo),
+    for nombre, fn in [("instalar-github", cmd_instalar_github), ("prioridad", cmd_prioridad),
+                       ("issue-al-tablero", cmd_issue_al_tablero), ("bloqueo", cmd_bloqueo),
                        ("reinicio", cmd_reinicio), ("aviso-duplicado", cmd_aviso_duplicado),
                        ("aviso-critico", cmd_aviso_critico), ("remoto", cmd_remoto), ("pro", cmd_pro), ("todos", cmd_todos)]:
         x = sp.add_parser(nombre)
