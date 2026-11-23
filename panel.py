@@ -130,7 +130,8 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
     cfg = E.cfg_proyecto(nombre)
     repos = cfg.get("repos") or [cfg.get("repo")]
     tb = cfg.get("tablero") or {}
-    salida = {"nombre": nombre, "descripcion": cfg.get("descripcion", ""), "repos": [], "tablero": tb.get("url"),
+    salida = {"nombre": nombre, "descripcion": cfg.get("descripcion", ""), "color": E.color_proyecto(nombre),
+              "repos": [], "tablero": tb.get("url"),
               "activo": E.coordinador_activo(nombre), "columnas": {e: 0 for e in T.ESTADOS}, "atencion": [],
               "tarjetas": {}, "error": None, "pruebas": pruebas_proyecto(cfg)}
 
@@ -140,7 +141,8 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
 
     def vistas():
         t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
-        return [v["name"] for v in t.info()["views"]["nodes"]]
+        info = t.info()
+        return {"nombres": [v["name"] for v in info["views"]["nodes"]], "agrupacion": T.aviso_agrupacion(info)}
 
     if tb.get("numero"):
         its = cacheado(f"items:{nombre}", 60, items, forzar)
@@ -163,7 +165,8 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
                 salida["atencion"].append({"nivel": "alta", "tipo": "bloqueo", "numero": it["numero"],
                                            "texto": f"#{it['numero']} bloqueada: {it['bloqueo'][:160]}",
                                            "url": it["url"], "reintentar": "CI en rojo" in it["bloqueo"]
-                                           or "sin modificar" in it["bloqueo"] or "Pruebas fallidas" in it["bloqueo"]})
+                                           or "sin modificar" in it["bloqueo"] or "Pruebas fallidas" in it["bloqueo"],
+                                           "reanudar": True})
             elif e == T.REVIEW:
                 salida["atencion"].append({"nivel": "alta", "tipo": "revision",
                                            "texto": f"PR para revisar: #{it['numero']} {it['titulo'][:70]}",
@@ -176,11 +179,14 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
             g.sort(key=lambda x: (T.rango_prioridad(x["prioridad"]), x["numero"]))
         salida["tarjetas"] = grupos
         vs = cacheado(f"vistas:{nombre}", 600, vistas, forzar)
-        if isinstance(vs, list):
-            faltan = [v for v in ("Tablero", "Planning") if v not in vs]
+        if isinstance(vs, dict) and "nombres" in vs:
+            faltan = [v for v in (T.VISTA_TABLERO, "Planning") if v not in vs["nombres"]]
             if faltan:
                 salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "url": tb.get("url"),
                                            "texto": f"Crear las vistas del tablero: {', '.join(faltan)}"})
+            if vs.get("agrupacion"):
+                salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "url": tb.get("url"),
+                                           "texto": vs["agrupacion"]})
     else:
         salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "texto": "El proyecto aún no tiene tablero",
                                    "url": None})
@@ -352,6 +358,33 @@ def crear_tarea(nombre: str, d: dict) -> tuple[dict, int]:
             "mensaje": f"#{numero} creada en {estado}"}, 200
 
 
+def guardar_secreto(nombre: str, token) -> dict:
+    """POST /api/proyecto/<n>/secreto: el token llega en el cuerpo y no se guarda ni se devuelve."""
+    if not isinstance(token, str) or not token.strip():
+        return {"ok": False, "mensaje": "Pega el token en el campo.", "guardados": [], "fallidos": []}
+    try:
+        res = E.guardar_secreto_tablero(nombre, token)
+    except Exception as e:  # noqa: BLE001
+        res = {"ok": False, "mensaje": f"Error: {E._sin_token(str(e), token.strip())[:200]}", "guardados": [], "fallidos": []}
+    with _cache_lock:
+        for k in [k for k in _cache if k.startswith("secreto:")]:
+            _cache.pop(k, None)
+    return res
+
+
+def cambiar_color(nombre: str, color) -> tuple[dict, int]:
+    if color not in E.PALETA:
+        return {"ok": False, "error": f"Color no válido; usa uno de: {', '.join(E.PALETA)}"}, 400
+    E.guardar_cfg_proyecto(nombre, {"color": color})
+    return {"ok": True, "color": color, "mensaje": f"Color de {nombre}: {color}"}, 200
+
+
+def reanudar(nombre: str, numero: int) -> dict:
+    """Continúa una tarea bloqueada desde su paso pendiente (sin --desde: no repite el trabajo del agente)."""
+    r = E.script(nombre, "coordinador.py", "reanudar", str(numero), capturar=True, timeout=60)
+    return {"ok": r.returncode == 0, "mensaje": (r.stdout or r.stderr).strip()[-300:]}
+
+
 def log_proyecto(nombre: str) -> str:
     p = E.PROYECTOS / nombre / "estado" / "vigilar.log"
     if not p.exists():
@@ -407,26 +440,45 @@ class Manejador(BaseHTTPRequestHandler):
         self._json({"error": "no encontrado"}, 404)
 
     def do_POST(self):
-        if not self._host_ok() or self.headers.get("X-Token") != TOKEN:
+        largo = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
+        crudo = self.rfile.read(largo) if largo else b""  # se lee siempre: rechazar sin leer puede cortar la conexión
+        if not self._host_ok() or not secrets.compare_digest((self.headers.get("X-Token") or "").encode("utf-8", "replace"),
+                                                             TOKEN.encode()):
             return self._json({"error": "no autorizado"}, 403)
-        largo = int(self.headers.get("Content-Length") or 0)
-        cuerpo = json.loads(self.rfile.read(largo) or b"{}") if largo else {}
+        try:
+            cuerpo = json.loads(crudo or b"{}")
+        except ValueError:
+            return self._json({"error": "cuerpo no válido"}, 400)
+        if not isinstance(cuerpo, dict):
+            return self._json({"error": "cuerpo no válido"}, 400)
         ruta = self.path
-        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/(arrancar|parar|reintentar)$", ruta)
+        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/(arrancar|parar|reintentar|reanudar|color)$", ruta)
         if m:
             nombre, accion = m.groups()
             if nombre not in E.proyectos():
                 return self._json({"error": "proyecto desconocido"}, 404)
+            if accion == "color":
+                return self._json(*cambiar_color(nombre, cuerpo.get("color")))
             if accion == "arrancar":
                 return self._json(arrancar(nombre))
             if accion == "parar":
                 return self._json(parar(nombre))
+            if accion == "reanudar":
+                return self._json(reanudar(nombre, int(cuerpo.get("numero", 0))))
             return self._json(reintentar(nombre, int(cuerpo.get("numero", 0))))
         m = re.match(r"^/api/proyecto/([a-z0-9-]+)/tarea$", ruta)
         if m:
             if m.group(1) not in E.proyectos():
                 return self._json({"error": "proyecto desconocido"}, 404)
             return self._json(*crear_tarea(m.group(1), cuerpo))
+
+
+        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/secreto$", ruta)
+        if m:
+            nombre = m.group(1)
+            if nombre not in E.proyectos():
+                return self._json({"error": "proyecto desconocido"}, 404)
+            return self._json(guardar_secreto(nombre, cuerpo.pop("token", "")))
         if ruta in ("/api/proyectos/importar", "/api/proyectos/nuevo"):
             nuevo = ruta.endswith("nuevo")
             nombre = (cuerpo.get("nombre") or "").strip()

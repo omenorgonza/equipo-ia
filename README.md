@@ -28,11 +28,23 @@ python3 equipo.py nuevo contestspy --repo contestspy --stack vacio --descripcion
 
 ### Qué hace el panel
 
-- **Requiere tu atención**: PR por revisar, tarjetas bloqueadas (con «Reintentar con el agente»), avisos de
+- **Requiere tu atención**: PR por revisar, tarjetas bloqueadas, avisos de
   seguridad críticos/altos y CI en rojo en la rama principal, de todos los proyectos a la vez.
-- **Puesta a punto pendiente** (plegable): vistas del tablero, secreto TABLERO_TOKEN, PR de instalación.
+  Toda tarjeta bloqueada tiene **Reanudar** (`coordinador.py reanudar N`: sigue desde el paso pendiente,
+  sin volver a llamar al agente si su trabajo ya está hecho); las que fallaron por CI, pruebas o falta de
+  cambios tienen además «Reintentar con el agente» (`reanudar N --desde agente`).
+- **Puesta a punto pendiente** (plegable): vistas del tablero, vista «Tablero» con columnas por otro campo
+  que no es Estado (p. ej. Status), secreto TABLERO_TOKEN, PR de instalación.
 - **Una tarjeta por proyecto**: estado del README, resumen, contadores por columna, repos con su CI, tareas en
   curso, enlaces al tablero y botones Arrancar/Parar/Ver log.
+- **Guardar TABLERO_TOKEN** (botón en cada tarjeta): pegas un token clásico en un campo de contraseña; el panel
+  comprueba con GitHub que es de tu usuario y que tiene los scopes `repo` y `project`, y solo entonces lo guarda
+  con `gh secret set TABLERO_TOKEN` (por stdin) en **todos** los repos del proyecto, indicando en cuáles. El token
+  no se escribe en disco, en logs, en la URL ni en las respuestas; la acción es un POST que exige el token del panel.
+- **Color propio por proyecto**: la tarjeta lleva una franja superior y un fondo suave del color del proyecto, y
+  su etiqueta en «Requiere tu atención» usa el mismo color. Se cambia con las 8 muestras de la tarjeta (azul,
+  verde, naranja, violeta, turquesa, rosa, ámbar, rojo; legibles en modo claro y oscuro) y se guarda en
+  `proyectos/<p>/config.json` (clave `color`). `nuevo`/`importar`/`migrar` asignan el primero libre de la paleta.
 - **Nuevo proyecto**: crea uno o varios repos privados con andamiaje (vacío o Python), el tablero, los
   workflows y la configuración. **Añadir proyecto existente**: no toca tu código; detecta la CI y abre una PR
   con la instalación.
@@ -192,10 +204,15 @@ python tablero.py crear                          # Project privado + campos Esta
 python tablero.py migrar                         # SOLO LECTURA: qué pasaría con las etiquetas actuales
 python tablero.py migrar --aplicar               # migra, retira etiquetas de estado y fija fuente_cola=tablero
 python ensayo_tablero.py instalar-github         # sube workflows + .equipo-ia, activa Dependabot, variables
-gh secret set TABLERO_TOKEN --repo <owner/repo>  # token clásico con scopes repo + project (para Actions)
+gh secret set TABLERO_TOKEN --repo <owner/repo>  # token clásico con scopes repo + project (o desde el panel)
 python tablero.py verificar                      # campos, vistas, privacidad y permisos con tu identidad
 gh workflow run mantenimiento.yml --repo <owner/repo>   # verifica el acceso del workflow (ver resumen del run)
 ```
+
+`verificar` (y el panel) leen con GraphQL por qué campo agrupa sus columnas la vista «Tablero»
+(`verticalGroupByFields`). Si no es **Estado** (por ejemplo, Status, el campo por defecto de GitHub), lo
+marcan como pendiente: Vista Tablero → Column by → Estado → Save. En el ensayo, el doble `fake_gh.py` lo simula
+con la clave `agrupar` de cada vista (`{"name": "Tablero", "layout": "BOARD_LAYOUT", "agrupar": ["Estado"]}`).
 
 ### Quién mueve cada tarjeta (un único sitio por transición)
 
