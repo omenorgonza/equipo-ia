@@ -101,6 +101,53 @@ assert {'ensayo','demo'} <= set(n), n
 assert all(p['error'] is None for p in d['proyectos']), [p['error'] for p in d['proyectos']]" && ok "estado de todos los proyectos" || mal "api/estado"
 CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$PUERTO/api/proyecto/demo/arrancar")
 [ "$CODIGO" = "403" ] && ok "acciones sin token rechazadas" || mal "acción sin token devolvió $CODIGO"
+API="http://127.0.0.1:$PUERTO/api/proyecto"
+CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" \
+  -d '{"titulo":"Sin token"}' "$API/demo/tarea")
+[ "$CODIGO" = "403" ] && ok "crear tarea sin token rechazada" || mal "crear tarea sin token devolvió $CODIGO"
+TOKEN=$(curl -sf "http://127.0.0.1:$PUERTO/" | sed -n 's/.*const TOKEN = "\([^"]*\)".*/\1/p')
+[ -n "$TOKEN" ] && ok "token del panel" || mal "no encontré el token en la página del panel"
+tarea() {  # tarea <proyecto> <json> → imprime «código cuerpo»
+  curl -s -w '\n%{http_code}' -X POST -H "Content-Type: application/json" -H "X-Token: $TOKEN" -d "$2" "$API/$1/tarea"
+}
+ISSUES_ANTES=$(python3 -c "import json,os;print(len(json.load(open(os.environ['FAKE_GH_STATE']))['issues']))")
+R=$(tarea demo '{"titulo":"Incompleta","todo":true}')
+[ "$(tail -1 <<<"$R")" = "400" ] && grep -q "Para --todo" <<<"$R" \
+  && ok "validación de tablero.py nueva (--todo incompleta) devuelta al formulario" || mal "validación --todo: $R"
+R=$(tarea ensayo '{"titulo":"Con CI","agente":"local","archivos":"a.txt","criterios":"existe","prueba":"ci","todo":true}')
+[ "$(tail -1 <<<"$R")" = "400" ] && grep -q "no tiene CI" <<<"$R" \
+  && ok "prueba «ci» rechazada en un proyecto sin ci.checks" || mal "validación ci: $R"
+ISSUES_DESPUES=$(python3 -c "import json,os;print(len(json.load(open(os.environ['FAKE_GH_STATE']))['issues']))")
+[ "$ISSUES_ANTES" = "$ISSUES_DESPUES" ] && ok "los errores de validación no crean nada" || mal "se crearon issues con datos no válidos"
+R=$(tarea demo '{"titulo":"Tarea desde el panel","objetivo":"Documentar el panel en docs/panel.md.","agente":"claude",
+  "archivos":"docs/panel.md\ndocs/indice.md","criterios":"existe docs/panel.md\nenlazado desde el índice","prueba":"ci",
+  "dependencias":"#3 4","prioridad":"P1"}')
+[ "$(tail -1 <<<"$R")" = "200" ] && ok "tarea creada desde el panel" || mal "crear tarea desde el panel: $R"
+R2=$(tarea demo '{"titulo":"Tarea directa","agente":"local","archivos":["docs/b.md"],"criterios":["existe docs/b.md"],
+  "prueba":"ci","todo":true}')
+[ "$(tail -1 <<<"$R2")" = "200" ] && ok "tarea directa a To Do creada desde el panel" || mal "tarea directa: $R2"
+python3 - <<'PY' && ok "tarjetas en el tablero simulado con todos los campos (Planning y To Do)" || mal "tarjetas del panel en el tablero"
+import json, os
+s = json.load(open(os.environ["FAKE_GH_STATE"]))
+p = [p for p in s["projects"].values() if p["title"] == "Equipo IA · demo"][0]
+def tarjeta(titulo):
+    for it in p["items"].values():
+        i = s["issues"].get(it.get("issue", ""))
+        if i and i["title"] == titulo:
+            return i, it["fields"]
+    raise AssertionError(f"no está en el tablero: {titulo}")
+i, f = tarjeta("Tarea desde el panel")
+assert f.get("Estado") == "Planning", f
+assert (f.get("Prioridad") or "").startswith("P1"), f
+b = i["body"]
+for trozo in ("Documentar el panel en docs/panel.md.", "### Agente\n\nclaude", "docs/panel.md\ndocs/indice.md",
+              "- existe docs/panel.md\n- enlazado desde el índice", "### Comando de prueba\n\nci", "#3 #4"):
+    assert trozo in b, (trozo, b)
+assert any("claude" in l for l in i["labels"]), i["labels"]
+i, f = tarjeta("Tarea directa")
+assert f.get("Estado") == "To Do", f
+assert (f.get("Prioridad") or "").startswith("P2"), f
+PY
 kill $PANEL 2>/dev/null || true
 python3 -c "
 import re; h=open('panel.html').read(); open('$S.panel.js','w').write(re.search(r'<script>(.*)</script>', h, re.S).group(1))"

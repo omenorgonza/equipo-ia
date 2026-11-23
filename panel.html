@@ -83,6 +83,9 @@
   .at a, .repo a, .tarj a { color: inherit; }
   .puesta { margin-top: 10px; }
   .puesta summary { padding: 8px 2px; }
+  .fila { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  label.check { display: flex; gap: 8px; align-items: center; color: var(--ink); font-size: 14px; }
+  .error { color: var(--bad); background: var(--hi); padding: 8px 10px; border-radius: 8px; margin: 0; font-size: 14px; }
 </style>
 </head>
 <body>
@@ -120,6 +123,31 @@
       <label>Descripción <input id="i-desc"></label>
       <p class="hint">No toca tu código: detecta la CI de cada repo y abre una PR con la instalación para que la revises.</p>
       <div class="acciones"><button class="primary" onclick="crear(false)">Añadir proyecto</button>
+        <button onclick="mostrar(null)">Cancelar</button></div>
+    </div>
+  </section>
+  <section id="f-tarea" hidden>
+    <h2 id="t-h">Nueva tarea</h2>
+    <div class="form">
+      <label>Título <input id="t-titulo" placeholder="Añadir media de puntos"></label>
+      <label>Objetivo <textarea id="t-objetivo" rows="3" placeholder="Qué hay que conseguir (por defecto, el título)"></textarea></label>
+      <div class="fila">
+        <label>Agente <select id="t-agente"><option value="">(sin asignar)</option>
+          <option value="claude">claude</option><option value="local">local</option></select></label>
+        <label>Prueba <select id="t-prueba"></select></label>
+        <label>Prioridad <select id="t-prioridad"><option>P0</option><option>P1</option>
+          <option selected>P2</option><option>P3</option></select></label>
+      </div>
+      <label>Archivos permitidos (uno por línea)
+        <textarea id="t-archivos" rows="3" placeholder="src/puntos.py&#10;tests/test_puntos.py"></textarea></label>
+      <label>Criterios de aceptación (uno por línea)
+        <textarea id="t-criterios" rows="3" placeholder="media([2,4]) == 3&#10;lista vacía → ValueError"></textarea></label>
+      <label>Dependencias (números de issue) <input id="t-deps" placeholder="12 15"></label>
+      <label class="check"><input type="checkbox" id="t-todo"> Directa a To Do (si no, va a Planning)</label>
+      <p class="hint">Directa a To Do exige agente, archivos, criterios y prueba. La prueba «ci» solo aparece si el
+        proyecto tiene la CI configurada como juez.</p>
+      <p class="error" id="t-error" hidden></p>
+      <div class="acciones"><button class="primary" id="t-crear" onclick="crearTarea()">Crear tarea</button>
         <button onclick="mostrar(null)">Cancelar</button></div>
     </div>
   </section>
@@ -210,6 +238,7 @@ function pintar() {
         ${p.activo ? `<button class="mini" onclick="accion('${p.nombre}','parar')">Parar equipo</button>`
                    : `<button class="mini primary" onclick="accion('${p.nombre}','arrancar')">Arrancar equipo</button>`}
         <button class="mini" onclick="verLog('${p.nombre}')">Ver log</button>
+        ${p.tablero ? `<button class="mini" onclick="nuevaTarea('${p.nombre}')">Nueva tarea</button>` : ""}
       </div></article>`; }).join("") || `<div class="vacio">Aún no hay proyectos. Usa «Nuevo proyecto» o «Añadir proyecto existente».</div>`;
 }
 
@@ -222,6 +251,7 @@ async function verLog(p) { const r = await (await fetch(`/api/proyecto/${p}/log`
 async function mostrar(cual) {
   document.getElementById("f-nuevo").hidden = cual !== "nuevo";
   document.getElementById("f-importar").hidden = cual !== "importar";
+  document.getElementById("f-tarea").hidden = cual !== "tarea";
   if (cual === "importar") {
     orden = [];
     const repos = await (await fetch("/api/repos")).json();
@@ -243,6 +273,33 @@ async function crear(nuevo) {
   const r = await post(nuevo ? "/api/proyectos/nuevo" : "/api/proyectos/importar", cuerpo);
   if (r.error) return toast(r.error);
   mostrar(null); seguir(r.trabajo);
+}
+let proyectoTarea = null;
+function nuevaTarea(nombre) {
+  proyectoTarea = nombre;
+  const p = (datos.proyectos || []).find(x => x.nombre === nombre) || {};
+  document.getElementById("t-h").textContent = `Nueva tarea · ${nombre}`;
+  document.getElementById("t-prueba").innerHTML = `<option value="">(sin prueba)</option>` +
+    (p.pruebas || []).map(k => `<option value="${esc(k)}">${esc(k === "ci" ? "ci (CI del proyecto)" : k)}</option>`).join("");
+  document.getElementById("t-error").hidden = true;
+  mostrar("tarea");
+}
+async function crearTarea() {
+  const v = id => document.getElementById(id).value;
+  const cuerpo = {titulo: v("t-titulo").trim(), objetivo: v("t-objetivo"), agente: v("t-agente"), prueba: v("t-prueba"),
+                  prioridad: v("t-prioridad"), archivos: v("t-archivos").split("\n"), criterios: v("t-criterios").split("\n"),
+                  dependencias: v("t-deps"), todo: document.getElementById("t-todo").checked};
+  const err = document.getElementById("t-error"), btn = document.getElementById("t-crear");
+  if (!cuerpo.titulo) { err.textContent = "El título es obligatorio"; err.hidden = false; return; }
+  btn.disabled = true; err.hidden = true;
+  try {
+    const r = await post(`/api/proyecto/${proyectoTarea}/tarea`, cuerpo);
+    if (r.error) { err.textContent = r.error; err.hidden = false; return; }
+    ["t-titulo", "t-objetivo", "t-archivos", "t-criterios", "t-deps"].forEach(id => document.getElementById(id).value = "");
+    document.getElementById("t-todo").checked = false;
+    mostrar(null); toast(r.mensaje); cargar(true);
+  } catch (e) { err.textContent = `No se pudo crear: ${e}`; err.hidden = false; }
+  finally { btn.disabled = false; }
 }
 async function seguir(id) {
   const box = document.getElementById("trabajo"); box.hidden = false;

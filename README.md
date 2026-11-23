@@ -36,6 +36,12 @@ python3 equipo.py nuevo contestspy --repo contestspy --stack vacio --descripcion
 - **Nuevo proyecto**: crea uno o varios repos privados con andamiaje (vacío o Python), el tablero, los
   workflows y la configuración. **Añadir proyecto existente**: no toca tu código; detecta la CI y abre una PR
   con la instalación.
+- **Nueva tarea** (botón en la tarjeta del proyecto): formulario con título, objetivo, agente, archivos
+  permitidos, criterios, prueba, dependencias y prioridad. Por defecto la tarjeta va a **Planning**; con
+  «Directa a To Do» queda autorizada. Usa `tablero.py nueva` por debajo, así que aplica las mismas
+  validaciones (To Do exige agente, archivos, criterios y prueba; `ci` solo si el proyecto tiene `ci.checks`)
+  y sus errores se muestran en el formulario sin crear nada. API: `POST /api/proyecto/<nombre>/tarea` con
+  la cabecera `X-Token`.
 
 Solo escucha en 127.0.0.1 y las acciones exigen un token que cambia en cada arranque.
 
