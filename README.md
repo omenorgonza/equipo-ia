@@ -197,6 +197,7 @@ gh workflow run mantenimiento.yml --repo <owner/repo>   # verifica el acceso del
 |---|---|---|
 | Backlog | Óscar | captura una idea (`python3 tablero.py nueva "título"` o desde la web) |
 | Planning | TL o `mantenimiento.yml` | propuesta con evidencia |
+| Planning (o Backlog / To Do) | `tablero-issue.yml` | issue abierta sin pasar por el tablero (móvil, otra sesión): la añade en Planning, o en el estado de una etiqueta `estado:backlog\|planning\|todo`, con la prioridad de `prioridad:p0..p3`. Si quien la creó ya la colocó, no la toca |
 | To Do | **Óscar** | autoriza; la tarjeta tiene agente (`agent:*`), alcance y criterios |
 | Doing | coordinador local | tras reservar y volver a comprobar la elegibilidad, antes de invocar al agente |
 | Testing / Review | coordinador local | PR creada y vinculada (`Closes #N`) |

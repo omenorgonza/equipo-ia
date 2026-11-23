@@ -9,6 +9,10 @@
         Done con el cambio incluido → PRO
         PRO cuyo cambio ya no está en producción (reversión) o sin despliegue que lo acredite
         (movimiento manual) → vuelve a Done con una nota.
+  issue-abierta --issue N [--espera S]
+      Issue nueva → tarjeta en el tablero, en Planning (o el estado de una etiqueta `estado:backlog|planning|todo`)
+      y con la prioridad de una etiqueta `prioridad:p0..p3`. Si quien la creó ya la colocó (tablero.py nueva, el
+      mantenimiento), no se toca. Así se pueden crear tarjetas sin acceso al tablero (móvil, otra sesión).
 Arrastrar una tarjeta nunca ejecuta un despliegue: ningún workflow se dispara por cambios del tablero.
 """
 from __future__ import annotations
@@ -16,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -149,6 +154,32 @@ def cmd_produccion(_a) -> None:
             fh.write(f"## Sincronización PRO\n\nProducción {etiqueta}: `{sha}`\n\nMovidos: {movidos}\n")
 
 
+ESTADO_POR_ETIQUETA = {"estado:backlog": T.BACKLOG, "estado:planning": T.PLANNING, "estado:todo": T.TODO}
+ETIQUETAS_PROPIAS = {"mantenimiento", "registro-mantenimiento", "simulado"}  # las coloca mantenimiento.py
+
+
+def cmd_issue_abierta(a) -> None:
+    import time
+    time.sleep(max(0, a.espera))  # deja que quien creó la issue la coloque antes (tablero.py nueva, --todo)
+    datos = json.loads(gh("issue", "view", str(a.issue), "--repo", REPO, "--json", "id,labels,state"))
+    etiquetas = {l["name"] for l in datos.get("labels", [])}
+    if datos.get("state", "OPEN").upper() != "OPEN" or etiquetas & ETIQUETAS_PROPIAS:
+        print(f"#{a.issue}: cerrada o del mantenimiento; nada que hacer.")
+        return
+    t = tablero()
+    it = t.item_de_issue(REPO, a.issue)
+    if it and it.get("estado"):
+        print(f"#{a.issue}: ya está en el tablero ({it['estado']}); no se toca.")
+        return
+    estado = next((ESTADO_POR_ETIQUETA[e] for e in sorted(etiquetas) if e in ESTADO_POR_ETIQUETA), T.PLANNING)
+    item_id = it["item_id"] if it else t.anadir(datos["id"])
+    t.mover(item_id, estado)
+    pri = next((e.split(":", 1)[1].upper() for e in sorted(etiquetas) if re.fullmatch(r"prioridad:p[0-3]", e)), None)
+    if pri and not (it and it.get("prioridad")):
+        t.poner_opcion(item_id, T.CAMPO_PRIORIDAD, T.prioridad_por_codigo(pri))
+    print(f"#{a.issue}: añadida al tablero en {estado}{', ' + T.prioridad_por_codigo(pri) if pri else ''}.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
@@ -156,6 +187,10 @@ def main() -> None:
     x.add_argument("--pr", type=int, required=True)
     x.set_defaults(f=cmd_pr_cerrada)
     sp.add_parser("produccion").set_defaults(f=cmd_produccion)
+    x = sp.add_parser("issue-abierta")
+    x.add_argument("--issue", type=int, required=True)
+    x.add_argument("--espera", type=int, default=20, help="Segundos de espera antes de mirar el tablero")
+    x.set_defaults(f=cmd_issue_abierta)
     a = ap.parse_args()
     a.f(a)
 
