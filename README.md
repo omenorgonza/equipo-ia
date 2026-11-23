@@ -26,6 +26,58 @@ python3 equipo.py importar family-finance --repo omenorgonza/family-finance --de
 python3 equipo.py nuevo contestspy --repo contestspy --stack vacio --descripcion "…"
 ```
 
+### Guía de uso: cómo trabajar con el equipo
+
+**El día a día**
+1. Apunta ideas en **Backlog** (web, móvil o el formulario «Nueva tarea» del panel). Una issue abierta en el
+   repo entra sola en **Planning** (`tablero-issue.yml`); con la etiqueta `estado:backlog` o `estado:todo` cae en
+   esa columna, y con `prioridad:p0`…`p3`, con esa prioridad.
+2. Cuando una tarjeta tiene agente, archivos, criterios y prueba, **arrástrala a To Do**: eso la autoriza.
+3. Pulsa **Arrancar** en el panel. El equipo toma las tarjetas de To Do y, al terminar, la PR queda en
+   **Testing / Review** con la CI en verde.
+4. Revisa la PR en GitHub e **intégrala**. La tarjeta pasa sola a **Done**.
+
+**Qué tarjeta coge primero.** Solo las de **To Do**, por prioridad (P0 → P3; sin prioridad, al final) y, a
+igual prioridad, la más antigua. Se salta las que tienen Bloqueo o esperan una dependencia. Hay **un trabajador
+por agente**: Claude y el local trabajan en paralelo, pero cada uno con una sola tarea a la vez. Una P0 no
+interrumpe la tarea en curso del mismo agente: espera a que termine.
+
+**Dependencias.** Se escriben en la sección «Dependencias» de la issue (`#12`). Una dependencia cuenta como
+lista cuando está en **Testing / Review** o más allá, aunque no esté integrada. La tarea dependiente parte de
+`main`, sin los cambios de la anterior, así que si las dos tocan los mismos archivos, integra antes la primera.
+Si la dependencia sigue en Backlog o Planning, la dependiente espera indefinidamente: muévelas juntas o deja la
+dependiente fuera de To Do. El log lo muestra como `esperando_dependencias: [N]`.
+
+**Integrar varias PR seguidas.** Hazlo de una en una y en el orden de la cadena. Después de cada integración,
+abre la siguiente: si GitHub muestra **Update branch**, púlsalo y espera a que la CI vuelva a salir en verde.
+Si dice que hay **conflictos**, no lo resuelvas a mano: pídeselo al TL o usa «Reintentar con el agente». Con
+conflictos, GitHub no lanza la CI y la tarea se queda esperando.
+
+**Parar el equipo.** «Parar» es suave: termina la tarea en curso y luego se detiene. Si esa tarea está esperando
+algo que no llega (por ejemplo, una CI que no se lanzó), córtalo a mano:
+```bash
+python3 equipo.py proyectos          # equipo-ia … ● en marcha (PID 12345)
+kill 12345
+python3 equipo.py equipo-ia reanudar N --desde ci   # o el paso que toque; la tarjeta vuelve a To Do
+```
+
+**Tarjetas bloqueadas.** El campo **Bloqueo** dice la causa y cómo seguir. En el panel: **Reanudar** continúa
+desde el paso pendiente sin volver a llamar al agente; **Reintentar con el agente** le pasa el fallo (por ejemplo,
+el log de la CI) para que lo corrija.
+
+**Done y PRO.** Done = integrado en `main` con la CI en verde. PRO = funcionando en producción: lo pone solo
+`despliegue.yml`/`mantenimiento.yml` cuando un despliegue **correcto** incluye el cambio. No se arrastra a mano
+(el sistema lo devuelve a Done). En `equipo-ia` no hay despliegue: **Done es el final**. En los proyectos sin
+servidor todavía, el despliegue es simulado.
+
+**Actualizar tu instalación** cuando se integran mejoras del propio equipo:
+```bash
+cd "/mnt/c/Users/neo_s/Documents/30 Proyectos/equipo-ia-lab"
+python3 equipo.py equipo-ia parar    # o kill <PID> si está esperando
+git pull --ff-only
+python3 equipo.py panel              # reinicia el panel (cierra antes el anterior con Ctrl+C)
+```
+
 ### Qué hace el panel
 
 - **Requiere tu atención**: PR por revisar, tarjetas bloqueadas, avisos de
