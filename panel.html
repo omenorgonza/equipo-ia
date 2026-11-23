@@ -123,6 +123,20 @@
         <button onclick="mostrar(null)">Cancelar</button></div>
     </div>
   </section>
+  <section id="f-secreto" hidden>
+    <h2 id="s-titulo">Guardar TABLERO_TOKEN</h2>
+    <form class="form" onsubmit="guardarSecreto(event)" autocomplete="off">
+      <input type="hidden" id="s-proyecto">
+      <p class="hint" id="s-repos"></p>
+      <label>Token clásico de GitHub con scopes <b>repo</b> y <b>project</b>
+        <input id="s-token" type="password" autocomplete="off" spellcheck="false" placeholder="ghp_…" required></label>
+      <p class="hint">Se comprueba con GitHub (tu usuario y los permisos) antes de guardarlo como secreto de Actions en
+        cada repo. No se escribe en disco ni en los logs, y el campo se vacía al enviarlo.</p>
+      <div class="acciones"><button class="primary" type="submit" id="s-boton">Validar y guardar</button>
+        <button type="button" onclick="mostrar(null)">Cancelar</button></div>
+      <div class="estado" id="s-resultado" hidden></div>
+    </form>
+  </section>
   <section id="trabajo" hidden>
     <h2 id="trabajo-t">Trabajo</h2>
     <pre id="trabajo-log"></pre>
@@ -210,6 +224,7 @@ function pintar() {
         ${p.activo ? `<button class="mini" onclick="accion('${p.nombre}','parar')">Parar equipo</button>`
                    : `<button class="mini primary" onclick="accion('${p.nombre}','arrancar')">Arrancar equipo</button>`}
         <button class="mini" onclick="verLog('${p.nombre}')">Ver log</button>
+        <button class="mini" onclick="abrirSecreto('${p.nombre}')">${p.repos.some(r => r.secreto === false) ? "Guardar" : "Cambiar"} TABLERO_TOKEN</button>
       </div></article>`; }).join("") || `<div class="vacio">Aún no hay proyectos. Usa «Nuevo proyecto» o «Añadir proyecto existente».</div>`;
 }
 
@@ -219,9 +234,41 @@ async function verLog(p) { const r = await (await fetch(`/api/proyecto/${p}/log`
   document.getElementById("logbox").hidden = false; document.getElementById("log-t").textContent = `Log del equipo · ${p}`;
   document.getElementById("log-pre").textContent = r.log; document.getElementById("logbox").scrollIntoView({behavior: "smooth"}); }
 
+function abrirSecreto(p) {
+  const pr = (datos.proyectos || []).find(x => x.nombre === p) || {repos: []};
+  document.getElementById("s-proyecto").value = p;
+  document.getElementById("s-titulo").textContent = `Guardar TABLERO_TOKEN · ${p}`;
+  document.getElementById("s-repos").textContent = "Repos: " + pr.repos.map(r =>
+    `${r.repo} (${r.secreto === true ? "ya lo tiene" : r.secreto === false ? "falta" : "sin datos"})`).join(", ");
+  document.getElementById("s-resultado").hidden = true;
+  document.getElementById("s-token").value = "";
+  mostrar("secreto");
+  document.getElementById("s-token").focus();
+}
+async function guardarSecreto(ev) {
+  ev.preventDefault();
+  const campo = document.getElementById("s-token"), boton = document.getElementById("s-boton");
+  const p = document.getElementById("s-proyecto").value, token = campo.value.trim();
+  campo.value = "";
+  if (!token) return toast("Pega el token en el campo");
+  boton.disabled = true;
+  const caja = document.getElementById("s-resultado");
+  caja.hidden = false; caja.textContent = "Validando el token con GitHub…";
+  let r;
+  try { r = await post(`/api/proyecto/${p}/secreto`, {token}); }
+  catch (e) { r = {ok: false, mensaje: "No se pudo contactar con el panel"}; }
+  boton.disabled = false;
+  const fallos = (r.fallidos || []).map(f => `${f.repo}: ${f.error}`).join(" · ");
+  caja.textContent = (r.mensaje || r.error || "") + (fallos ? ` — ${fallos}` : "");
+  toast(r.ok ? "TABLERO_TOKEN guardado" : "No se guardó el token");
+  if (r.ok) setTimeout(() => cargar(true), 800);
+}
+
 async function mostrar(cual) {
   document.getElementById("f-nuevo").hidden = cual !== "nuevo";
   document.getElementById("f-importar").hidden = cual !== "importar";
+  document.getElementById("f-secreto").hidden = cual !== "secreto";
+  if (cual !== "secreto") document.getElementById("s-token").value = "";
   if (cual === "importar") {
     orden = [];
     const repos = await (await fetch("/api/repos")).json();

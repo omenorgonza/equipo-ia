@@ -266,6 +266,20 @@ def reintentar(nombre: str, numero: int) -> dict:
     return {"ok": r.returncode == 0, "mensaje": (r.stdout or r.stderr).strip()[-300:]}
 
 
+def guardar_secreto(nombre: str, token) -> dict:
+    """POST /api/proyecto/<n>/secreto: el token llega en el cuerpo y no se guarda ni se devuelve."""
+    if not isinstance(token, str) or not token.strip():
+        return {"ok": False, "mensaje": "Pega el token en el campo.", "guardados": [], "fallidos": []}
+    try:
+        res = E.guardar_secreto_tablero(nombre, token)
+    except Exception as e:  # noqa: BLE001
+        res = {"ok": False, "mensaje": f"Error: {E._sin_token(str(e), token.strip())[:200]}", "guardados": [], "fallidos": []}
+    with _cache_lock:
+        for k in [k for k in _cache if k.startswith("secreto:")]:
+            _cache.pop(k, None)
+    return res
+
+
 def log_proyecto(nombre: str) -> str:
     p = E.PROYECTOS / nombre / "estado" / "vigilar.log"
     if not p.exists():
@@ -321,10 +335,17 @@ class Manejador(BaseHTTPRequestHandler):
         self._json({"error": "no encontrado"}, 404)
 
     def do_POST(self):
-        if not self._host_ok() or self.headers.get("X-Token") != TOKEN:
+        largo = min(int(self.headers.get("Content-Length") or 0), 1_000_000)
+        crudo = self.rfile.read(largo) if largo else b""  # se lee siempre: rechazar sin leer puede cortar la conexión
+        if not self._host_ok() or not secrets.compare_digest((self.headers.get("X-Token") or "").encode("utf-8", "replace"),
+                                                             TOKEN.encode()):
             return self._json({"error": "no autorizado"}, 403)
-        largo = int(self.headers.get("Content-Length") or 0)
-        cuerpo = json.loads(self.rfile.read(largo) or b"{}") if largo else {}
+        try:
+            cuerpo = json.loads(crudo or b"{}")
+        except ValueError:
+            return self._json({"error": "cuerpo no válido"}, 400)
+        if not isinstance(cuerpo, dict):
+            return self._json({"error": "cuerpo no válido"}, 400)
         ruta = self.path
         m = re.match(r"^/api/proyecto/([a-z0-9-]+)/(arrancar|parar|reintentar)$", ruta)
         if m:
@@ -336,6 +357,12 @@ class Manejador(BaseHTTPRequestHandler):
             if accion == "parar":
                 return self._json(parar(nombre))
             return self._json(reintentar(nombre, int(cuerpo.get("numero", 0))))
+        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/secreto$", ruta)
+        if m:
+            nombre = m.group(1)
+            if nombre not in E.proyectos():
+                return self._json({"error": "proyecto desconocido"}, 404)
+            return self._json(guardar_secreto(nombre, cuerpo.pop("token", "")))
         if ruta in ("/api/proyectos/importar", "/api/proyectos/nuevo"):
             nuevo = ruta.endswith("nuevo")
             nombre = (cuerpo.get("nombre") or "").strip()

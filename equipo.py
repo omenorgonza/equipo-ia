@@ -120,6 +120,83 @@ def login() -> str:
     return gh("api", "user", "--jq", ".login").strip()
 
 
+# --------------------------------------------------------------------------- secreto TABLERO_TOKEN
+# El token solo viaja en memoria: por la variable GH_TOKEN del proceso hijo que lo valida y por stdin de
+# `gh secret set`. Nunca se escribe en disco, en logs, en argumentos ni en los mensajes que se devuelven.
+
+TOKEN_TABLERO_OK = re.compile(r"^[A-Za-z0-9_\-+.:]{20,255}$")
+SCOPES_TABLERO = ("repo", "project")
+
+
+def _sin_token(texto: str, token: str) -> str:
+    return (texto or "").replace(token, "***") if token else (texto or "")
+
+
+def validar_token_tablero(token: str, usuario: str) -> tuple[bool, str]:
+    """Comprueba que el token es de `usuario` y tiene los scopes `repo` y `project` (token clásico)."""
+    if not TOKEN_TABLERO_OK.match(token or ""):
+        return False, "El token no tiene un formato válido (pega solo el token, sin espacios)."
+    env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")}
+    env["GH_TOKEN"] = token
+    r = C.ejecutar(gh_bin() + ["api", "user", "--include"], cwd=LAB, timeout=60, env=env)
+    if r.returncode != 0:
+        detalle = _sin_token((r.stderr or r.stdout).strip(), token)[:160]
+        if "401" in detalle or "Bad credentials" in detalle:
+            return False, "GitHub rechaza el token (no existe, caducó o está revocado)."
+        return False, f"No se pudo validar el token: {detalle}"
+    salida = r.stdout or ""
+    cabeceras, _, cuerpo = salida.replace("\r\n", "\n").partition("\n\n")
+    scopes: set[str] = set()
+    es_clasico = False
+    for linea in cabeceras.splitlines():
+        k, _, v = linea.partition(":")
+        if k.strip().lower() == "x-oauth-scopes":
+            es_clasico = True
+            scopes = {x.strip() for x in v.split(",") if x.strip()}
+    try:
+        quien = (json.loads(cuerpo.strip() or "{}") or {}).get("login", "")
+    except ValueError:
+        quien = ""
+    if not quien:
+        return False, "GitHub no devolvió el usuario del token."
+    if usuario and quien.lower() != usuario.lower():
+        return False, f"El token es de «{quien}», pero el equipo trabaja con «{usuario}». Genera uno con tu cuenta."
+    if not es_clasico:
+        return False, "Hace falta un token clásico (Settings → Developer settings → Tokens (classic)) con scopes repo y project."
+    faltan = [s for s in SCOPES_TABLERO if s not in scopes]
+    if faltan:
+        return False, f"Al token le faltan permisos: {', '.join(faltan)} (necesita repo y project)."
+    return True, f"Token válido de {quien} con permisos repo y project."
+
+
+def guardar_secreto_tablero(nombre: str, token: str) -> dict:
+    """Valida el token y, solo si es válido, lo guarda como secreto TABLERO_TOKEN en todos los repos del proyecto."""
+    cfg = cfg_proyecto(nombre)
+    repos = [r for r in (cfg.get("repos") or [cfg.get("repo")]) if r]
+    token = (token or "").strip()
+    try:
+        usuario = login()
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "mensaje": f"No se pudo saber tu usuario de GitHub: {_sin_token(str(e), token)[:160]}",
+                "guardados": [], "fallidos": []}
+    ok, msg = validar_token_tablero(token, usuario)
+    if not ok:
+        return {"ok": False, "mensaje": msg, "guardados": [], "fallidos": []}
+    guardados, fallidos = [], []
+    for repo in repos:
+        r = C.ejecutar(gh_bin() + ["secret", "set", "TABLERO_TOKEN", "--repo", repo, "--app", "actions"],
+                       cwd=LAB, timeout=120, stdin_text=token)
+        if r.returncode == 0:
+            guardados.append(repo)
+        else:
+            fallidos.append({"repo": repo, "error": _sin_token((r.stderr or r.stdout).strip(), token)[:200]})
+    if fallidos:
+        texto = f"Guardado en {len(guardados)} de {len(repos)} repo(s); falló en {', '.join(f['repo'] for f in fallidos)}."
+    else:
+        texto = f"TABLERO_TOKEN guardado en {', '.join(guardados)}."
+    return {"ok": not fallidos and bool(guardados), "mensaje": texto, "guardados": guardados, "fallidos": fallidos}
+
+
 # --------------------------------------------------------------------------- detección en GitHub
 
 def detectar_ci(repo: str) -> dict:
