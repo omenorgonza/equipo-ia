@@ -133,7 +133,7 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
     salida = {"nombre": nombre, "descripcion": cfg.get("descripcion", ""), "color": E.color_proyecto(nombre),
               "repos": [], "tablero": tb.get("url"),
               "activo": E.coordinador_activo(nombre), "columnas": {e: 0 for e in T.ESTADOS}, "atencion": [],
-              "tarjetas": {}, "error": None}
+              "tarjetas": {}, "error": None, "pruebas": pruebas_proyecto(cfg)}
 
     def items():
         t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
@@ -272,6 +272,92 @@ def reintentar(nombre: str, numero: int) -> dict:
     return {"ok": r.returncode == 0, "mensaje": (r.stdout or r.stderr).strip()[-300:]}
 
 
+AGENTES_TAREA = ("claude", "local")
+PRIORIDADES_TAREA = ("P0", "P1", "P2", "P3")
+
+
+def _lineas(valor) -> list[str]:
+    """Lista desde un array JSON o un texto con una entrada por línea; descarta vacíos."""
+    if isinstance(valor, str):
+        valor = valor.splitlines()
+    return [str(x).strip() for x in (valor or []) if str(x).strip()]
+
+
+def pruebas_proyecto(cfg: dict) -> list[str]:
+    """Valores aceptados por `tablero.py nueva --prueba`: claves de pruebas y «ci» solo si hay ci.checks."""
+    return list(cfg.get("pruebas") or {}) + (["ci"] if (cfg.get("ci") or {}).get("checks") else [])
+
+
+def crear_tarea(nombre: str, d: dict) -> tuple[dict, int]:
+    """Crea la tarjeta reutilizando `tablero.py nueva` (sus validaciones). Sin «todo» la deja en Planning."""
+    titulo = (d.get("titulo") or "").strip()
+    if not titulo:
+        return {"error": "El título es obligatorio"}, 400
+    if titulo.startswith("-"):
+        return {"error": "El título no puede empezar por «-»"}, 400
+    agente = (d.get("agente") or "").strip()
+    if agente and agente not in AGENTES_TAREA:
+        return {"error": f"Agente desconocido: {agente} (usa {', '.join(AGENTES_TAREA)})"}, 400
+    prioridad = (d.get("prioridad") or "P2").strip()
+    if prioridad not in PRIORIDADES_TAREA:
+        return {"error": f"Prioridad no válida: {prioridad}"}, 400
+    deps_txt = d.get("dependencias") or []
+    if isinstance(deps_txt, str):
+        deps_txt = re.split(r"[\s,]+", deps_txt)
+    deps = []
+    for x in deps_txt:
+        x = str(x).strip().lstrip("#")
+        if not x:
+            continue
+        if not x.isdigit():
+            return {"error": f"Dependencia no válida: {x} (números de issue, p. ej. 12 o #12)"}, 400
+        deps.append(x)
+    todo = bool(d.get("todo"))
+    # Forma --opcion=valor: valores que empiecen por «-» no se confunden con opciones.
+    args = ["nueva", titulo, f"--prioridad={prioridad}"]
+    if (d.get("objetivo") or "").strip():
+        args.append(f"--objetivo={d['objetivo'].strip()}")
+    if agente:
+        args.append(f"--agente={agente}")
+    args += [f"--archivo={a}" for a in _lineas(d.get("archivos"))]
+    args += [f"--criterio={c}" for c in _lineas(d.get("criterios"))]
+    if (d.get("prueba") or "").strip():
+        args.append(f"--prueba={d['prueba'].strip()}")
+    args += [f"--dep={n}" for n in deps]
+    if todo:
+        args.append("--todo")
+    r = E.script(nombre, "tablero.py", *args, capturar=True, timeout=180)
+    salida = (r.stdout or "").strip()
+    if r.returncode != 0:
+        error = (r.stderr or r.stdout or "").strip().splitlines()
+        return {"error": error[-1] if error else "tablero.py nueva falló"}, 400
+    m = re.search(r"^#(\d+) creada", salida, re.M)
+    if not m:
+        return {"error": f"Respuesta inesperada de tablero.py nueva: {salida[-300:]}"}, 500
+    numero = int(m.group(1))
+    estado = T.TODO if todo else T.BACKLOG
+    if not todo:
+        cfg = E.cfg_proyecto(nombre)
+        tb = cfg["tablero"]
+        try:
+            t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
+            it = t.item_de_issue(cfg["repo"], numero)
+            if not it:
+                raise RuntimeError("no encuentro la tarjeta en el tablero")
+            t.mover(it["item_id"], T.PLANNING)
+            estado = T.PLANNING
+        except Exception as e:  # noqa: BLE001 — la issue ya existe; se informa sin ocultarlo
+            with _cache_lock:
+                _cache.clear()
+            return {"ok": True, "numero": numero, "estado": estado,
+                    "mensaje": f"#{numero} creada en {estado}, pero no pude moverla a Planning: {str(e)[:200]}"}, 200
+    with _cache_lock:
+        _cache.clear()
+    url = salida.splitlines()[0].rsplit(": ", 1)[-1] if ": " in salida else None
+    return {"ok": True, "numero": numero, "estado": estado, "url": url,
+            "mensaje": f"#{numero} creada en {estado}"}, 200
+
+
 def guardar_secreto(nombre: str, token) -> dict:
     """POST /api/proyecto/<n>/secreto: el token llega en el cuerpo y no se guarda ni se devuelve."""
     if not isinstance(token, str) or not token.strip():
@@ -380,6 +466,13 @@ class Manejador(BaseHTTPRequestHandler):
             if accion == "reanudar":
                 return self._json(reanudar(nombre, int(cuerpo.get("numero", 0))))
             return self._json(reintentar(nombre, int(cuerpo.get("numero", 0))))
+        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/tarea$", ruta)
+        if m:
+            if m.group(1) not in E.proyectos():
+                return self._json({"error": "proyecto desconocido"}, 404)
+            return self._json(*crear_tarea(m.group(1), cuerpo))
+
+
         m = re.match(r"^/api/proyecto/([a-z0-9-]+)/secreto$", ruta)
         if m:
             nombre = m.group(1)
