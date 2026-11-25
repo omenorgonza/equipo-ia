@@ -880,9 +880,23 @@ class Procesador:
         # 2. agente
         if not paso_hecho(f, "agente"):
             t0 = time.time()
+            conflicto = json.loads(f["tiempos"] or "{}").get("conflicto")
+            if conflicto:
+                conflicto = self.partir_de_base_actualizada(con, numero, wt, base, commit, conflicto)
+                commit = conflicto["nueva_base"]
             log(f"#{numero}: invocando agente '{agente}'")
             prompt = construir_prompt(numero, titulo, datos, agente)
-            fallo_ci = json.loads(f["tiempos"] or "{}").get("ci_fallo")
+            if conflicto:
+                prompt += (f"\nEn el intento anterior la PR tenía conflictos con `{conflicto['base']}`, que ha avanzado. "
+                           f"El worktree parte ahora de `{conflicto['base']}` actualizada (sin tus cambios anteriores): "
+                           "vuelve a implementar la tarea integrando lo que ya hay en la base.\n"
+                           "Archivos en conflicto:\n"
+                           + ("\n".join(f"- {a}" for a in conflicto.get("archivos") or []) or "- (GitHub no los detalla)")
+                           + "\n")
+                if conflicto.get("diff_previo"):
+                    prompt += ("Tus cambios del intento anterior, como referencia:\n```diff\n"
+                               + conflicto["diff_previo"][-6000:] + "\n```\n")
+            fallo_ci = json.loads(obtener(con, self.repo, numero)["tiempos"] or "{}").get("ci_fallo")
             if fallo_ci:
                 prompt += ("\nEn el intento anterior la CI del proyecto falló. Corrige la causa sin salirte de los "
                            "archivos permitidos. Extracto del log:\n```\n" + fallo_ci[-4000:] + "\n```\n")
@@ -932,13 +946,19 @@ class Procesador:
             tiempos = json.loads(obtener(con, self.repo, numero)["tiempos"] or "{}")
             tiempos["pruebas"] = resultado_pruebas
             tiempos["diffstat"] = diff
+            tiempos.pop("conflicto", None)
             actualizar(con, self.repo, numero, tiempos=json.dumps(tiempos))
         f = obtener(con, self.repo, numero)
 
-        # 5. push
+        # 5. push (forzado con lease solo si la rama se rehízo sobre la base actualizada)
         if not paso_hecho(f, "push"):
             t0 = time.time()
-            self.git.run("push", "-u", "origin", f"{rama}:{rama}", cwd=wt)
+            forzar = bool(json.loads(f["tiempos"] or "{}").get("forzar_push"))
+            self.git.run("push", "-u", *(["--force-with-lease"] if forzar else []), "origin", f"{rama}:{rama}", cwd=wt)
+            if forzar:
+                tiempos = json.loads(obtener(con, self.repo, numero)["tiempos"] or "{}")
+                tiempos.pop("forzar_push", None)
+                actualizar(con, self.repo, numero, tiempos=json.dumps(tiempos))
             self._marcar(con, numero, "push", t0)
             log(f"#{numero}: rama subida")
         f = obtener(con, self.repo, numero)
@@ -958,8 +978,9 @@ class Procesador:
         # 6 bis. CI del proyecto como juez
         if datos["prueba"] == "ci" and not paso_hecho(f, "ci"):
             t0 = time.time()
+            self.traer_rama_remota(numero, wt, rama)
             head = self.git.run("rev-parse", "HEAD", cwd=wt)
-            self.esperar_ci(con, numero, f["pr_numero"], head)
+            self.esperar_ci(con, numero, f["pr_numero"], head, wt, rama, base)
             self._marcar(con, numero, "ci", t0)
 
         # 7. review
@@ -967,17 +988,98 @@ class Procesador:
         actualizar(con, self.repo, numero, estado="revision", paso="review", pid=0)
         return "revision"
 
-    def esperar_ci(self, con, numero: int, pr: int, head: str) -> None:
-        """Espera los checks requeridos sobre el commit actual de la PR; verde → lista para revisión."""
+    def partir_de_base_actualizada(self, con, numero: int, wt: Path, base: str, commit: str, conflicto: dict) -> dict:
+        """Reintento tras «PR con conflictos»: la rama se rehace sobre origin/<base> actual. Los cambios del intento
+        anterior se guardan (log y prompt) y la rama se sube después con --force-with-lease. Idempotente."""
+        if conflicto.get("nueva_base"):
+            return conflicto
+        base = conflicto.get("base") or base
+        with self.git_lock:
+            self.git.run("fetch", "origin", base, cwd=wt)
+            nueva = self.git.run("rev-parse", f"origin/{base}", cwd=wt)
+        diff_previo = self.git.run("diff", commit, "HEAD", cwd=wt, comprobar=False)
+        self._log_archivo(numero, "diff-previo-conflicto", diff_previo)
+        self.git.run("reset", "--hard", nueva, cwd=wt)
+        self.git.run("clean", "-fd", cwd=wt, comprobar=False)
+        conflicto = {**conflicto, "base": base, "nueva_base": nueva, "diff_previo": diff_previo[-6000:]}
+        tiempos = json.loads(obtener(con, self.repo, numero)["tiempos"] or "{}")
+        tiempos["conflicto"] = conflicto
+        tiempos["forzar_push"] = True
+        tiempos.pop("ci_fallo", None)
+        actualizar(con, self.repo, numero, commit_base=nueva, tiempos=json.dumps(tiempos))
+        log(f"#{numero}: la rama parte de {base} actualizada ({nueva[:10]}) para resolver los conflictos")
+        return conflicto
+
+    def traer_rama_remota(self, numero: int, wt: Path, rama: str) -> None:
+        """Antes de esperar la CI: trae al worktree los commits que otros (p. ej. el TL) hayan subido a la rama."""
+        try:
+            self.git.run("pull", "--ff-only", "origin", rama, cwd=wt)
+        except RuntimeError as e:
+            raise Bloqueo(f"La rama {rama} del worktree y la de GitHub divergen",
+                          f"Integra a mano en `{wt}` (o descarta los cambios locales) y ejecuta "
+                          f"`reanudar {numero} --desde ci`.", str(e)[-1500:])
+
+    def _head_de_la_pr(self, wt: Path, rama: str, local: str, remoto: str, aceptados: set[str]) -> bool:
+        """El HEAD remoto de la PR cuenta si es nuestro commit o desciende de él (commits ajenos encima).
+        Un HEAD remoto anterior (GitHub aún no ha visto el push) no cuenta: sus checks serían de otro intento."""
+        if not remoto:
+            return False
+        if remoto in aceptados:
+            return True
+        self.git.run("fetch", "origin", rama, cwd=wt, comprobar=False)
+        try:
+            self.git.run("merge-base", "--is-ancestor", local, remoto, cwd=wt)
+        except RuntimeError:
+            return False
+        aceptados.add(remoto)
+        return True
+
+    def conflictos_con_base(self, wt: Path, base: str, head: str) -> list[str]:
+        """Archivos en conflicto entre origin/<base> y el HEAD de la PR (vacío si git no sabe calcularlo)."""
+        self.git.run("fetch", "origin", base, cwd=wt, comprobar=False)
+        r = ejecutar(self.cfg["git_bin"] + ["-c", "core.quotepath=false", "merge-tree", "--write-tree", "--name-only",
+                                            "--no-messages", f"origin/{base}", head], cwd=wt, timeout=120)
+        if r.returncode != 1:
+            return []
+        return [l.strip() for l in (r.stdout or "").splitlines()[1:] if l.strip()]
+
+    def esperar_ci(self, con, numero: int, pr: int, head: str, wt: Path | None = None, rama: str = "",
+                   base: str = "") -> None:
+        """Espera los checks requeridos sobre el HEAD remoto de la PR; verde → lista para revisión.
+        Si la PR tiene conflictos con la base, GitHub no lanza la CI: se bloquea enseguida."""
         ci = self.cfg["ci"]
         requeridos = set(ci["checks"])
         limite = time.time() + ci.get("timeout_s", 2400)
+        aceptados = {head}
+        avisado = ""
         log(f"#{numero}: esperando la CI ({', '.join(sorted(requeridos))}) en la PR #{pr}")
         while True:
             datos = json.loads(self.gh.run("pr", "view", str(pr), "--repo", self.repo,
                                            "--json", "headRefOid,statusCheckRollup,isDraft"))
+            remoto = datos.get("headRefOid") or ""
+            if wt is not None and rama:
+                valido = self._head_de_la_pr(wt, rama, head, remoto, aceptados)
+            else:
+                valido = remoto == head
+            rest = json.loads(self.gh.run("api", f"repos/{self.repo}/pulls/{pr}") or "{}")
+            base_pr = ((rest.get("base") or {}).get("ref")) or base or "la rama base"
+            sha_rest = (rest.get("head") or {}).get("sha")
+            if valido and sha_rest in (None, remoto) and \
+                    (rest.get("mergeable") is False or rest.get("mergeable_state") == "dirty"):
+                archivos = self.conflictos_con_base(wt, base_pr, remoto) if wt else []
+                tiempos = json.loads(obtener(con, self.repo, numero)["tiempos"] or "{}")
+                tiempos["conflicto"] = {"base": base_pr, "archivos": archivos, "pr": pr}
+                actualizar(con, self.repo, numero, tiempos=json.dumps(tiempos))
+                raise Bloqueo(f"PR con conflictos con {base_pr} (PR #{pr})"
+                              + (f": {', '.join(archivos)}" if archivos else ""),
+                              "GitHub no lanza la CI mientras haya conflictos. «Reintentar con el agente» en el panel "
+                              f"o `reanudar {numero} --desde agente`: el agente parte de {base_pr} actualizada y "
+                              "recibe los archivos en conflicto.")
             checks = {}
-            if datos.get("headRefOid") == head:
+            if valido and remoto != head and avisado != remoto:
+                avisado = remoto
+                log(f"#{numero}: la rama de la PR tiene commits nuevos ({remoto[:10]}); cuenta la CI de ese commit")
+            if valido:
                 for c in datos.get("statusCheckRollup") or []:
                     nombre = c.get("name") or c.get("context")
                     if nombre in requeridos:
@@ -991,8 +1093,11 @@ class Procesador:
                         self.gh.run("pr", "ready", str(pr), "--repo", self.repo)
                     tiempos = json.loads(obtener(con, self.repo, numero)["tiempos"] or "{}")
                     tiempos.pop("ci_fallo", None)
-                    tiempos["pruebas"] = f"CI del proyecto en verde: {', '.join(sorted(requeridos))} sobre `{head[:10]}`"
+                    tiempos.pop("conflicto", None)
+                    tiempos["pruebas"] = f"CI del proyecto en verde: {', '.join(sorted(requeridos))} sobre `{remoto[:10]}`"
                     actualizar(con, self.repo, numero, tiempos=json.dumps(tiempos))
+                    if wt is not None and rama and remoto != head:  # deja el worktree igual que la PR
+                        self.git.run("pull", "--ff-only", "origin", rama, cwd=wt, comprobar=False)
                     log(f"#{numero}: CI en verde; PR lista para revisión")
                     return
                 extracto = self.log_ci(rojos)
