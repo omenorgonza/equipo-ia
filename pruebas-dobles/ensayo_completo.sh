@@ -168,6 +168,183 @@ grep -q "CI en verde" "$S.ajeno2.log" && ok "reanudar --desde ci y CI en verde" 
   && grep -q "Retoque del TL" "proyectos/demo/worktrees/issue-$N2/docs/ajeno.md" \
   && ok "reanudar --desde ci trajo la rama remota al worktree" || mal "el worktree no tiene la rama remota"
 
+echo "== 4 quinquies. Revisión entre agentes: rondas, corrección, escalado al senior, rondas agotadas y antes_de_pr"
+mkdir -p "$S.revlib"
+cat > "$S.revlib/revlib.py" <<'PY'
+# Estado simulado de la tarea NR del proyecto demo: issue, PR, comentarios de la PR y campos de su tarjeta.
+import json, os
+n = int(os.environ["NR"])
+s = json.load(open(os.environ["FAKE_GH_STATE"]))
+clave = f"oscar/demo-app#{n}"
+issue = s["issues"][clave]
+prs = [p for p in s["prs"] if p["repo"] == "oscar/demo-app" and p["head"].endswith(f"/issue-{n}")]
+pr = prs[0] if prs else {}
+com = pr.get("comments", [])
+tablero = [p for p in s["projects"].values() if p["title"] == "Equipo IA · demo"][0]
+campos = [it["fields"] for it in tablero["items"].values() if it.get("issue") == clave][0]
+def lecciones(agente):
+    p = f"lecciones/{agente}.md"
+    return open(p, encoding="utf-8").read() if os.path.exists(p) else ""
+PY
+nueva_rev() {  # nueva_rev <nombre> <agente> <guion> <prueba> → número de la issue (el guion lo lee fake_agente como revisor)
+  python3 equipo.py demo tablero nueva "Revisión $1" --agente "$2" \
+    --objetivo "Crea el archivo docs/$1.md con un título. [REV:$3]" \
+    --archivo "docs/$1.md" --criterio "existe docs/$1.md" --prueba "$4" --todo | sed -n 's/^#\([0-9]*\) creada.*/\1/p'
+}
+comprobar_rev() {  # comprobar_rev <issue> <mensaje> (script de python por stdin); usar siempre con `|| …` (set -e)
+  if NR="$1" PYTHONPATH="$S.revlib" python3 -; then ok "$2"; else mal "$2"; return 1; fi
+}
+
+N=$(nueva_rev rev-ok local ok ci)
+python3 equipo.py demo una-vez > "$S.rev-ok.log" 2>&1 || true
+comprobar_rev "$N" "aprobada en 2 rondas, registradas en la PR (comentarios y descripción)" <<'PY' || cat "$S.rev-ok.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review", campos
+assert len(com) == 2 and "Revisión 1/2 · revisor: claude" in com[0] and "Revisión 2/2 · revisor: claude" in com[1], com
+b = pr["body"]
+assert b.count("### Revisión entre agentes") == 1 and "aprobada** tras 2 rondas" in b and "Revisión 2/2 · revisor: claude" in b, b
+assert not pr["draft"], "la PR sigue en borrador"
+p = open(f"proyectos/demo/estado/prompts/issue-{n}-revision-1.md", encoding="utf-8").read()
+for x in ("existe docs/rev-ok.md", "Hecho por el equipo", "CI del proyecto en verde", "LECCIONES del autor (local)", "SOLO LECTURA"):
+    assert x in p, (x, p)
+PY
+
+N=$(nueva_rev rev-corrige local corrige ci)
+python3 equipo.py demo una-vez > "$S.rev-corrige.log" 2>&1 || true
+comprobar_rev "$N" "bloqueante en la ronda 1 → corrige el autor, CI otra vez y ronda 2 aprobada" <<'PY' || cat "$S.rev-corrige.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and issue["labels"] == ["agent:local"], (campos, issue["labels"])
+assert len(com) == 2 and "1 bloqueante(s)" in com[0] and "aprobada" in com[1], com
+assert "@oscar" not in com[0] and "#1" not in com[0], "el texto del revisor avisa a alguien o enlaza issues: " + com[0]
+p = open(f"proyectos/demo/estado/prompts/issue-{n}-correccion-1.md", encoding="utf-8").read()
+assert "Falta la explicación (corrige, ronda 1)" in p and "=== TAREA" in p, p
+assert "Corregido" in open(f"proyectos/demo/worktrees/issue-{n}/docs/rev-corrige.md", encoding="utf-8").read()
+PY
+grep -c "CI en verde" "$S.rev-corrige.log" | grep -qx 2 && ok "la CI se repite tras la corrección" || mal "la CI no se repitió"
+comprobar_rev "$N" "el hallazgo corregido pasa a lecciones/local.md y a su skill" <<'PY' || true
+from revlib import *
+t = "docs/rev-corrige.md: Falta la explicación (corrige, ronda 1)"
+assert t in lecciones("local"), lecciones("local")
+assert t in open(".opencode/skills/equipo-lecciones-local/SKILL.md", encoding="utf-8").read()
+PY
+
+N=$(nueva_rev rev-escala local escala ci)
+python3 equipo.py demo una-vez > "$S.rev-escala.log" 2>&1 || true
+comprobar_rev "$N" "bloqueantes tras la ronda 2 → escala al senior sobre la misma rama, con el historial" <<'PY' || cat "$S.rev-escala.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and issue["labels"] == ["agent:claude"], (campos, issue["labels"])
+assert len(prs) == 1 and pr["head"] == f"agente/local/issue-{n}", prs
+assert len(com) == 3 and "Revisión 3/3" in com[2] and "autor: claude" in com[2] and "aprobada" in com[2], com
+assert any("pasa a `claude`" in c and "tras la revisión 2" in c and "Revisión 1/2" in c for c in issue["comments"]), issue["comments"]
+p = open(f"proyectos/demo/estado/prompts/issue-{n}-correccion-2.md", encoding="utf-8").read()
+assert "ha escalado a ti" in p and "Revisión 1/2" in p and "Falta la explicación (escala, ronda 2)" in p, p
+assert "Escalada de `local` a `claude`" in pr["body"], pr["body"]
+assert "(escala, ronda 1)" in lecciones("local") and "(escala, ronda" not in lecciones("claude")
+PY
+comprobar_rev "$N" "el senior delega una subtarea al junior (issue hija sin autorizar)" <<'PY' || true
+from revlib import *
+h = [i for i in s["issues"].values() if i["title"] == "Subtarea delegada al junior"]
+assert len(h) == 1 and h[0]["labels"] == ["agent:local"] and f"### Dependencias\n\n#{n}" in h[0]["body"], h
+assert not [it for it in tablero["items"].values() if it.get("issue") == f"oscar/demo-app#{h[0]['number']}"], "autorizada sin Óscar"
+PY
+python3 equipo.py demo reanudar "$N" --desde revision-agentes > /dev/null
+python3 equipo.py demo una-vez > "$S.rev-escala2.log" 2>&1 || true
+comprobar_rev "$N" "tras escalar, la tarea se reanuda con el senior (la etiqueta manda sobre el campo Agente)" <<'PY' || cat "$S.rev-escala2.log"
+from revlib import *
+assert "no coincide con la etiqueta" not in (campos.get("Bloqueo") or ""), campos
+assert len(com) > 3 and "autor: claude" in com[3], com
+PY
+
+N=$(nueva_rev rev-agota claude agota ci)
+python3 equipo.py demo una-vez > "$S.rev-agota.log" 2>&1 || true
+comprobar_rev "$N" "rondas agotadas con el senior → Bloqueo con el resumen de hallazgos" <<'PY' || cat "$S.rev-agota.log"
+from revlib import *
+b = campos.get("Bloqueo") or ""
+assert campos["Estado"] == "To Do" and "3 rondas agotadas" in b and "Falta la explicación (agota, ronda 3)" in b, campos
+assert f"reanudar {n} --desde agente" in b and len(com) == 3 and pr["draft"], (b, com)
+assert "(agota" not in lecciones("claude"), "lección de un hallazgo sin corregir"
+PY
+
+for GUION in edita intenta ilegible; do
+  N=$(nueva_rev "rev-$GUION" local "$GUION" ci)
+  python3 equipo.py demo una-vez > "$S.rev-$GUION.log" 2>&1 || true
+  comprobar_rev "$N" "revisor que $GUION: la ronda no cuenta y se repite" <<'PY' || cat "$S.rev-$GUION.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review", campos
+assert len(com) == 3 and "no cuenta" in com[0] and "Revisión 1/2" in com[1] and "Revisión 2/2" in com[2], com
+wt = f"proyectos/demo/worktrees/issue-{n}"
+assert not os.path.exists(wt + "/escrito-por-el-revisor.txt")
+assert not any("Cambiado por el revisor" in open(f"{wt}/docs/{f}", encoding="utf-8").read() for f in os.listdir(wt + "/docs"))
+PY
+done
+
+revision_demo() {  # revision_demo <pruebas_locales separadas por comas> <intensiva_cada>
+  LOCALES="$1" CADA="$2" python3 - <<'PY'
+import json, os
+ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
+c["pruebas"] = {"docs-tarea": ["{python}", "-c", "import glob,sys; sys.exit(0 if glob.glob('docs/*.md') else 1)"],
+                "nota": ["{python}", "-c", "print('nota OK')"], "no-arranca": ["comando-que-no-existe-xyz"]}
+c["revision"] = {"antes_de_pr": True, "pruebas_locales": os.environ["LOCALES"].split(","),
+                 "intensiva_cada": int(os.environ["CADA"])}
+json.dump(c, open(ruta, "w"), indent=2)
+PY
+}
+prs_abiertas() {
+  python3 -c "
+import sqlite3; print(sqlite3.connect('proyectos/demo/estado/registro.db').execute('SELECT count(*) FROM tareas WHERE pr_numero IS NOT NULL').fetchone()[0])"
+}
+revision_demo docs-tarea,nota $(( $(prs_abiertas) + 2 ))   # la siguiente PR no es la intensiva
+N=$(nueva_rev rev-previa local corrige docs-tarea)
+python3 equipo.py demo una-vez > "$S.rev-previa.log" 2>&1 || true
+APROBADA=$(grep -n "revisión entre agentes aprobada tras 2 rondas" "$S.rev-previa.log" | head -1 | cut -d: -f1 || true)
+SUBIDA=$(grep -n "rama subida" "$S.rev-previa.log" | head -1 | cut -d: -f1 || true)
+[ -n "$APROBADA" ] && [ -n "$SUBIDA" ] && [ "$APROBADA" -lt "$SUBIDA" ] \
+  && ok "antes_de_pr: la rama y la PR van después de las dos rondas" || { cat "$S.rev-previa.log"; mal "antes_de_pr: orden"; }
+comprobar_rev "$N" "antes_de_pr: la descripción documenta rondas, comandos, resultados y riesgos" <<'PY' || cat "$S.rev-previa.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and len(prs) == 1, (campos, prs)
+b = pr["body"]
+for x in ("Revisión 1/2 · revisor: claude", "Revisión 2/2 · revisor: claude", "1 bloqueante(s)", "Comandos ejecutados",
+          "Revisión 1: `docs-tarea`", "Revisión 2: `docs-tarea`", "Revisión 2: `nota`", "código 0", "nota OK",
+          "Riesgos residuales", "Sin prueba de carga"):
+    assert x in b, (x, b)
+assert "Revisión 1: `nota`" not in b and "intensiva" not in b and len(com) == 2, (b, com)
+PY
+
+revision_demo docs-tarea,no-arranca 0
+N=$(nueva_rev rev-sin-evidencia local ok docs-tarea)
+python3 equipo.py demo una-vez > "$S.rev-sin.log" 2>&1 || true
+comprobar_rev "$N" "antes_de_pr sin evidencia de pruebas: Bloqueo y sin PR" <<'PY' || cat "$S.rev-sin.log"
+from revlib import *
+assert "Sin evidencia de pruebas" in (campos.get("Bloqueo") or "") and "no-arranca" in campos["Bloqueo"], campos
+assert not prs and campos["Estado"] == "To Do", (prs, campos)
+PY
+[ -z "$(git -C "$REM" branch --list "agente/local/issue-$N")" ] && ok "sin evidencia tampoco se sube la rama" || mal "se subió la rama"
+
+revision_demo docs-tarea,nota $(( $(prs_abiertas) + 1 ))   # la siguiente PR sí es la intensiva
+N=$(nueva_rev rev-intensiva local ok docs-tarea)
+python3 equipo.py demo una-vez > "$S.rev-intensiva.log" 2>&1 || true
+comprobar_rev "$N" "intensiva_cada: tercera ronda intensiva antes de la PR que toca" <<'PY' || cat "$S.rev-intensiva.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review", campos
+assert "Revisión 3/3 · revisor: claude · intensiva" in pr["body"] and "aprobada** tras 3 rondas" in pr["body"], pr["body"]
+PY
+python3 - <<'PY'
+import json
+ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
+del c["revision"], c["pruebas"]
+json.dump(c, open(ruta, "w"), indent=2)
+PY
+comprobar_rev "$N" "ninguna PR en Testing / Review sin dos rondas registradas" <<'PY' || true
+from revlib import *
+for it in tablero["items"].values():
+    if it["fields"].get("Estado") == "Testing / Review":
+        k = int(it["issue"].split("#")[1])
+        p = [p for p in s["prs"] if p["repo"] == "oscar/demo-app" and p["head"].endswith(f"/issue-{k}")][0]
+        assert len([c for c in p.get("comments", []) if "· revisor:" in c and "no cuenta" not in c]) >= 2, p
+        assert "aprobada** tras" in p["body"], p["body"]
+PY
+
 echo "== 4 bis. Vista «Tablero»: columnas por Estado (sin aviso) o por otro campo (aviso con el arreglo)"
 python3 - <<'PY'
 import json, os

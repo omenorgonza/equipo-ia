@@ -401,6 +401,9 @@ elif a[:2] == ["pr", "create"]:
                      "head": opt(a, "--head"), "base": opt(a, "--base"), "title": opt(a, "--title"), "body": b,
                      "draft": "--draft" in a, "closes": [int(x) for x in re.findall(r"Closes #(\d+)", b)]})
     texto = s["prs"][-1]["url"]
+elif a[:2] == ["pr", "comment"]:
+    p = next(p for p in s["prs"] if str(p["number"]) == a[2] and p["repo"] == repo_de(a))
+    p.setdefault("comments", []).append(body(a))
 elif a[:2] == ["pr", "edit"]:
     # gh 2.45 falla aquí por projectCards: el coordinador debe editar por la API REST.
     print("GraphQL: Projects (classic) is being deprecated (repository.pullRequest.projectCards)", file=sys.stderr)
