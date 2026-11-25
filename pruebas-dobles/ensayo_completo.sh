@@ -318,6 +318,92 @@ import json,sys; d=json.load(sys.stdin); assert [p['color'] for p in d['proyecto
   && ok "color guardado con token en config.json" || mal "color con token no se guardó"
 CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"numero": 1}' "http://127.0.0.1:$PUERTO/api/proyecto/demo/reanudar")
 [ "$CODIGO" = "403" ] && ok "reanudar sin token rechazado" || mal "reanudar sin token devolvió $CODIGO"
+
+echo "== 5c. Progreso en directo de las tareas en Doing (log del agente, posible atasco, salida de Doing)"
+python3 - <<'PY'
+import json
+c = json.load(open("proyectos/demo/config.json")); c["umbral_atasco_s"] = 2   # umbral bajo solo para el ensayo
+json.dump(c, open("proyectos/demo/config.json", "w"), indent=2)
+PY
+NP=$(python3 equipo.py demo tablero nueva "Tarea en directo" --agente claude \
+  --objetivo "Crea el archivo docs/progreso.md con un título. PASO-A-PASO" \
+  --archivo "docs/progreso.md" --criterio "existe docs/progreso.md" --prueba ci --todo | sed -n 's/^#\([0-9]*\) creada.*/\1/p')
+[ -n "$NP" ] && ok "tarea en directo creada (#$NP)" || mal "no se creó la tarea en directo"
+# fake_agente escribe poco a poco (1 s entre eventos) y después calla 15 s: con umbral 2 s, posible atasco.
+FAKE_AGENTE_PASO_S=1 FAKE_AGENTE_SILENCIO_S=15 python3 equipo.py demo una-vez > "$S.prog.log" 2>&1 &
+UNAVEZ=$!
+NP="$NP" PUERTO="$PUERTO" python3 - <<'PY' || FALLOS=$((FALLOS + 1))
+import json, os, sys, time, urllib.request
+n = int(os.environ["NP"]); base = f"http://127.0.0.1:{os.environ['PUERTO']}"
+fallos = 0
+def get(ruta):
+    return json.load(urllib.request.urlopen(base + ruta, timeout=60))
+def demo(refrescar=False):
+    return [p for p in get("/api/estado" + ("?refrescar=1" if refrescar else ""))["proyectos"] if p["nombre"] == "demo"][0]
+def prog(p):
+    return next((x for x in p.get("progreso") or [] if x["numero"] == n), None)
+def esperar(cond, s=40):
+    fin = time.time() + s
+    while time.time() < fin:
+        r = cond()
+        if r:
+            return r
+        time.sleep(0.4)
+    return None
+def check(cond, msg, detalle=""):
+    global fallos
+    print(("OK    " if cond else "FALLO ") + msg + ("" if cond else f" — {detalle}"))
+    fallos += 0 if cond else 1
+pg = esperar(lambda: (lambda x: x if x and x["paso"] == "agente" else None)(prog(demo())))
+check(pg is not None, "/api/estado devuelve el progreso de la tarea en curso (paso agente)")
+if pg is None:
+    sys.exit(fallos)
+check(isinstance(pg["minutos"], int) and pg["limite_s"] and pg["limite_min"] and pg["ultima_actividad"]
+      and isinstance(pg["inactivo_s"], int) and pg["agente"] == "claude",
+      "progreso con minutos, límite, última actividad y agente", pg)
+pg = esperar(lambda: (lambda x: x if x and (x["archivos_cambiados"] or 0) >= 1 else None)(prog(demo())))
+check(pg is not None, "archivos cambiados en el worktree (git status --porcelain)", pg)
+log = os.path.join("proyectos", "demo", "estado", "agentes", f"issue-{n}.log")
+def en_vivo():
+    x = prog(demo())
+    if not x or x["paso"] != "agente" or not os.path.exists(log):
+        return None
+    return "herramienta Write: escribe docs/progreso.md" in open(log, encoding="utf-8").read()
+check(esperar(en_vivo, 15), "la salida del agente aparece en issue-N.log mientras se ejecuta (resumen de stream-json)")
+r = get(f"/api/proyecto/demo/progreso/{n}")
+check(r["en_curso"] and "herramienta Write: escribe docs/progreso.md" in r["log"] and r["progreso"]["paso"] == "agente"
+      and len(r["log"].splitlines()) <= 60, "«Ver progreso» devuelve las últimas líneas del log", r)
+d = demo(refrescar=True)
+doing = [t for t in d["tarjetas"].get("Doing", []) if t["numero"] == n]
+check(doing and doing[0].get("progreso", {}).get("paso") == "agente", "la tarjeta en Doing lleva su progreso",
+      d["tarjetas"].get("Doing"))
+def atasco():
+    p = demo()
+    a = [a for a in p["atencion"] if a.get("tipo") == "atasco" and a.get("numero") == n]
+    x = prog(p)
+    return a and x and x["atasco"] and (a[0], x)
+r = esperar(atasco, 15)
+check(bool(r) and "posible atasco" in r[0]["texto"] and r[0]["nivel"] == "alta" and r[0].get("progreso"),
+      "sin actividad > umbral: posible atasco en «Requiere tu atención»", r)
+sys.exit(fallos)
+PY
+wait "$UNAVEZ" || true
+grep -q "CI en verde" "$S.prog.log" && ok "la tarea en directo termina (CI en verde)" || { cat "$S.prog.log"; mal "tarea en directo"; }
+NP="$NP" PUERTO="$PUERTO" python3 - <<'PY' && ok "el progreso desaparece al salir de Doing" || mal "el progreso sigue tras salir de Doing"
+import json, os, urllib.request
+n = int(os.environ["NP"])
+d = json.load(urllib.request.urlopen(f"http://127.0.0.1:{os.environ['PUERTO']}/api/estado", timeout=60))
+p = [p for p in d["proyectos"] if p["nombre"] == "demo"][0]
+assert not [x for x in p["progreso"] if x["numero"] == n], p["progreso"]
+assert not [a for a in p["atencion"] if a.get("tipo") == "atasco" and a.get("numero") == n], p["atencion"]
+f = json.load(open("proyectos/demo/estado/progreso.json"))
+assert str(n) not in f.get("tareas", {}), f
+PY
+LOGP="proyectos/demo/estado/agentes/issue-$NP.log"
+grep -q "CI: consulta" "$LOGP" && ok "la espera de la CI cuenta como actividad (consultas en el log)" || mal "sin consultas de CI en $LOGP"
+TOKF="ghp_$(printf 'Q7%.0s' $(seq 1 18))"
+grep -q "ghp_Q7…" "$LOGP" && [ -z "$(grep -rlF -- "$TOKF" "$S" "$S".* 2>/dev/null || true)" ] \
+  && ok "el token de la salida del agente se filtra en los logs" || mal "token sin filtrar en los logs"
 kill $PANEL 2>/dev/null || true
 python3 -c "
 import re; h=open('panel.html').read(); open('$S.panel.js','w').write(re.search(r'<script>(.*)</script>', h, re.S).group(1))"

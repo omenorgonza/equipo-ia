@@ -21,6 +21,36 @@ if modo == "cuota":
 if modo == "nada":
     print("He pensado en la tarea pero no he escrito nada.")
     sys.exit(0)
+def evento(ev: dict, texto: str) -> None:
+    """claude (stdin) emite eventos stream-json; opencode (--file), texto tal cual. Siempre con flush."""
+    print(texto if "--file" in a else json.dumps(ev), flush=True)
+
+
+if "PASO-A-PASO" in prompt:
+    # Progreso en directo: escribe poco a poco, tarda unos segundos y luego se queda callado (posible atasco).
+    import re as _re
+    import time as _time
+    paso = float(os.environ.get("FAKE_AGENTE_PASO_S", "1"))
+    silencio = float(os.environ.get("FAKE_AGENTE_SILENCIO_S", "6"))
+    ruta = _re.search(r"Crea el archivo (docs/\S+?\.md)", prompt).group(1)
+    evento({"type": "system", "subtype": "init", "model": "fake-modelo"}, "opencode: sesión iniciada")
+    _time.sleep(paso)
+    evento({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Read", "input": {"file_path": "README.md"}}]}}, "Read README.md")
+    _time.sleep(paso)
+    Path(ruta).parent.mkdir(parents=True, exist_ok=True)
+    Path(ruta).write_text("# Progreso en directo\n")
+    evento({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Write", "input": {"file_path": ruta}}]}}, f"Write {ruta}")
+    # Un token en la salida: el log en directo debe filtrarlo.
+    print("[stderr-fake] usando ghp_" + "Q7" * 18 + " para nada", file=sys.stderr, flush=True)
+    _time.sleep(paso)
+    evento({"type": "assistant", "message": {"content": [{"type": "text", "text": "Archivo escrito; repaso."}]}},
+           "Archivo escrito; repaso.")
+    _time.sleep(silencio)
+    evento({"type": "result", "subtype": "success", "is_error": False, "result": "hecho", "duration_ms": 9000,
+            "num_turns": 3, "total_cost_usd": 0.0}, "Listo.")
+    sys.exit(0)
 if "prueba-" in prompt and "LISTO" in prompt:
     nombre = prompt.split("archivo ")[1].split()[0]
     Path(nombre).write_text("LISTO\n")
