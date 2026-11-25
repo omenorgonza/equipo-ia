@@ -56,6 +56,8 @@ LOCK_PATH = ESTADO / "coordinador.lock"
 STOP_PATH = ESTADO / "DETENER"
 LOGS = ESTADO / "logs"
 PROMPTS = ESTADO / "prompts"
+PROGRESO_PATH = ESTADO / "progreso.json"   # progreso en directo de las tareas en curso (lo lee el panel)
+AGENTES_LOGS = ESTADO / "agentes"          # issue-N.log: salida del agente mientras se ejecuta
 WORKTREES = PD / "worktrees"
 IS_WIN = os.name == "nt"
 
@@ -201,6 +203,75 @@ def ejecutar(cmd: list[str], cwd: Path | None = None, timeout: int | None = None
     return r
 
 
+def ejecutar_en_directo(cmd: list[str], cwd: Path | None = None, timeout: int | None = None,
+                        stdin_text: str | None = None, env: dict | None = None,
+                        resumir=None, al_linea=None) -> subprocess.CompletedProcess:
+    """Como `ejecutar`, pero entrega cada línea de salida según llega (para el log en directo y la última
+    actividad). `resumir(linea)` convierte una línea de stdout en texto legible (None = sin texto);
+    `al_linea(texto)` recibe el texto ya filtrado de secretos (o None si la línea no tenía resumen)."""
+    cmd = resolver_bin(cmd)
+    kwargs = dict(cwd=str(cwd) if cwd else None, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                  stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+                  text=True, encoding="utf-8", errors="replace", bufsize=1)
+    if IS_WIN:
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        p = subprocess.Popen(cmd, **kwargs)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(cmd, 127, "", f"No se encuentra el ejecutable: {cmd[0]}")
+    partes: dict[str, list[str]] = {"out": [], "err": []}
+
+    def leer(flujo, clave: str) -> None:
+        try:
+            for linea in flujo:
+                partes[clave].append(linea)
+                l = linea.rstrip("\r\n")
+                if not l.strip():
+                    continue
+                if clave == "err":
+                    texto = "[stderr] " + l
+                else:
+                    try:
+                        texto = resumir(l) if resumir else l
+                    except Exception:  # noqa: BLE001 — un evento raro no corta la lectura
+                        texto = l
+                if al_linea:
+                    try:
+                        al_linea(redactar(texto)[:500] if texto else None)
+                    except Exception:  # noqa: BLE001 — el log en directo nunca para al agente
+                        pass
+        except (OSError, ValueError):
+            pass
+
+    hilos = [threading.Thread(target=leer, args=(p.stdout, "out"), daemon=True),
+             threading.Thread(target=leer, args=(p.stderr, "err"), daemon=True)]
+    for h in hilos:
+        h.start()
+    if stdin_text is not None:
+        try:
+            p.stdin.write(stdin_text)
+            p.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+    vencido = False
+    try:
+        p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        matar_arbol(p)
+        p.wait()
+        vencido = True
+    for h in hilos:
+        h.join(timeout=10)
+    out, err = "".join(partes["out"]), "".join(partes["err"])
+    if vencido:
+        r = subprocess.CompletedProcess(cmd, -9, out, err + "\n[coordinador] TIEMPO MÁXIMO EXCEDIDO")
+        r.timeout = True  # type: ignore[attr-defined]
+        return r
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
+
 def matar_arbol(p: subprocess.Popen) -> None:
     try:
         if IS_WIN:
@@ -259,6 +330,179 @@ def cerrojo_coordinador():
         yield
     finally:
         LOCK_PATH.unlink(missing_ok=True)
+
+
+# --------------------------------------------------------------------------- progreso en directo
+# Un solo coordinador por proyecto (cerrojo): el diccionario en memoria es la fuente y se vuelca entero a
+# estado/progreso.json con un reemplazo atómico. Al arrancar se descartan entradas de procesos anteriores.
+
+_progreso: dict[str, dict] = {}
+_progreso_lock = threading.RLock()
+_progreso_volcado = [0.0]
+_progreso_pendiente: list[threading.Timer] = []
+MAX_LOG_AGENTE = 2_000_000
+
+
+def log_agente_path(numero: int) -> Path:
+    return AGENTES_LOGS / f"issue-{numero}.log"
+
+
+def _volcar_progreso(forzar: bool = True) -> None:
+    with _progreso_lock:
+        if not forzar and time.time() - _progreso_volcado[0] < 1.0:
+            if not _progreso_pendiente:  # como mucho una escritura por segundo, pero sin perder la última
+                t = threading.Timer(1.0, _volcar_progreso)
+                t.daemon = True
+                _progreso_pendiente.append(t)
+                t.start()
+            return
+        _progreso_pendiente.clear()
+        _progreso_volcado[0] = time.time()
+        try:  # el progreso es informativo: un fallo al escribirlo nunca para la tarea
+            ESTADO.mkdir(parents=True, exist_ok=True)
+            tmp = PROGRESO_PATH.with_name(f"progreso.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps({"pid": os.getpid(), "actualizado": ahora(), "tareas": _progreso},
+                                      ensure_ascii=False, indent=1), encoding="utf-8")
+            for intento in range(5):
+                try:
+                    os.replace(tmp, PROGRESO_PATH)
+                    return
+                except PermissionError:  # Windows: el panel lo está leyendo justo ahora
+                    time.sleep(0.05 * (intento + 1))
+            tmp.unlink(missing_ok=True)
+        except OSError as e:
+            log(f"No se pudo escribir {PROGRESO_PATH.name}: {e}")
+
+
+def _escribir_log_agente(numero: int, texto: str) -> None:
+    p = log_agente_path(numero)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(f"[{dt.datetime.now():%H:%M:%S}] {redactar(texto)}\n")
+    except OSError as e:
+        log(f"No se pudo escribir {p.name}: {e}")
+
+
+def progreso_iniciar(numero: int, agente: str, worktree: Path) -> None:
+    with _progreso_lock:
+        p = log_agente_path(numero)
+        if p.exists() and p.stat().st_size > MAX_LOG_AGENTE:  # conserva solo la parte final
+            lineas = p.read_text(encoding="utf-8", errors="replace").splitlines()[-2000:]
+            p.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+        _escribir_log_agente(numero, f"=== #{numero} · {agente} · inicio de la tarea ===")
+        t = time.time()
+        _progreso[str(numero)] = {
+            "issue": numero, "agente": agente, "pid": os.getpid(), "worktree": str(worktree),
+            "log": str(p), "paso": "reservada", "limite_s": None,
+            "inicio_tarea": ahora(), "inicio_tarea_ts": t, "inicio_paso": ahora(), "inicio_paso_ts": t,
+            "ultima_actividad": ahora(), "ultima_actividad_ts": t, "ultima_linea": "inicio de la tarea"}
+        _volcar_progreso()
+
+
+def progreso_paso(numero: int, paso: str, limite_s: int | float | None) -> None:
+    with _progreso_lock:
+        e = _progreso.get(str(numero))
+        if e is None:
+            return
+        t = time.time()
+        texto = f"── paso {paso}" + (f" (límite {int(limite_s)} s)" if limite_s else "")
+        _escribir_log_agente(numero, texto)
+        e.update(paso=paso, limite_s=int(limite_s) if limite_s else None, inicio_paso=ahora(), inicio_paso_ts=t,
+                 ultima_actividad=ahora(), ultima_actividad_ts=t, ultima_linea=texto)
+        _volcar_progreso()
+
+
+def progreso_actividad(numero: int, texto: str | None, al_log: bool = True) -> None:
+    """Última actividad: una línea del agente o una consulta de la CI. `texto` ya puede venir filtrado."""
+    with _progreso_lock:
+        if texto and al_log:
+            _escribir_log_agente(numero, texto)
+        e = _progreso.get(str(numero))
+        if e is None:
+            return
+        e["ultima_actividad"], e["ultima_actividad_ts"] = ahora(), time.time()
+        if texto:
+            e["ultima_linea"] = redactar(texto)[:300]
+        _volcar_progreso(forzar=False)
+
+
+def progreso_quitar(numero: int) -> None:
+    with _progreso_lock:
+        if _progreso.pop(str(numero), None) is not None or PROGRESO_PATH.exists():
+            _volcar_progreso()
+
+
+def _corto(v, n: int = 120) -> str:
+    s = " ".join(str(v).split())
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def resumir_evento_claude(linea: str) -> str | None:
+    """Resumen legible de un evento de `claude -p --output-format stream-json`; otra salida, tal cual."""
+    try:
+        ev = json.loads(linea)
+    except ValueError:
+        return linea
+    if not isinstance(ev, dict):
+        return linea
+    tipo = ev.get("type")
+    if tipo == "system":
+        return f"sesión {ev.get('subtype') or ''} · modelo {ev.get('model') or '?'}".strip()
+    if tipo == "result":
+        dur = ev.get("duration_ms")
+        return (f"resultado: {'ERROR' if ev.get('is_error') else 'ok'} ({ev.get('subtype') or '-'})"
+                + (f" en {round(dur / 1000)} s" if isinstance(dur, (int, float)) else "")
+                + (f" · {ev.get('num_turns')} turnos" if ev.get("num_turns") else ""))
+    contenido = ((ev.get("message") or {}).get("content")) or []
+    if isinstance(contenido, str):
+        contenido = [{"type": "text", "text": contenido}]
+    partes = []
+    for c in contenido if isinstance(contenido, list) else []:
+        if not isinstance(c, dict):
+            continue
+        if c.get("type") == "tool_use":
+            inp = c.get("input") or {}
+            detalle = inp.get("file_path") or inp.get("path") or inp.get("pattern") or inp.get("command") \
+                or inp.get("description") or ""
+            accion = {"Read": "lee", "Edit": "edita", "MultiEdit": "edita", "Write": "escribe", "Glob": "busca",
+                      "Grep": "busca", "Bash": "ejecuta"}.get(c.get("name"), "usa")
+            partes.append(f"herramienta {c.get('name')}: {accion} {_corto(detalle)}".rstrip())
+        elif c.get("type") == "text" and tipo == "assistant" and (c.get("text") or "").strip():
+            partes.append("dice: " + _corto(c["text"], 160))
+        elif c.get("type") == "tool_result" and c.get("is_error"):
+            partes.append("la herramienta devolvió un error: " + _corto(c.get("content"), 120))
+    return " · ".join(partes) or None
+
+
+def resultado_claude(stdout: str) -> dict:
+    """El evento final `result` (stream-json) o el objeto único (json)."""
+    for linea in reversed((stdout or "").strip().splitlines()):
+        try:
+            ev = json.loads(linea)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("type") == "result":
+            return ev
+    try:
+        ev = json.loads(stdout)
+        return ev if isinstance(ev, dict) else {}
+    except ValueError:
+        return {}
+
+
+def args_claude_en_directo(args: list[str]) -> list[str]:
+    """Fuerza `--output-format stream-json` (con --verbose, que claude exige en -p) para ver cada evento."""
+    args = list(args)
+    if "--output-format" in args:
+        i = args.index("--output-format")
+        if i + 1 < len(args):
+            args[i + 1] = "stream-json"
+    else:
+        args += ["--output-format", "stream-json"]
+    if "--verbose" not in args:
+        args.append("--verbose")
+    return args
 
 
 # --------------------------------------------------------------------------- registro
@@ -685,8 +929,10 @@ def construir_prompt(numero: int, titulo: str, datos: dict, agente: str = "") ->
                                   criterios=datos["criterios"] or "(vacío)")
 
 
-def invocar_agente(cfg: dict, nombre: str, cwd: Path, prompt: str, archivo_prompt: Path) -> tuple[subprocess.CompletedProcess, dict]:
-    """Lanza el agente sin shell. El prompt va por stdin (claude) o por archivo (opencode)."""
+def invocar_agente(cfg: dict, nombre: str, cwd: Path, prompt: str, archivo_prompt: Path,
+                   al_linea=None) -> tuple[subprocess.CompletedProcess, dict]:
+    """Lanza el agente sin shell. El prompt va por stdin (claude) o por archivo (opencode).
+    La salida se entrega línea a línea a `al_linea` mientras se ejecuta (log en directo)."""
     ag = cfg["agentes"][nombre]
     archivo_prompt.parent.mkdir(parents=True, exist_ok=True)
     archivo_prompt.write_text(prompt, encoding="utf-8")
@@ -700,15 +946,17 @@ def invocar_agente(cfg: dict, nombre: str, cwd: Path, prompt: str, archivo_promp
         modelo = ag["modelo"]
         cmd = ag["bin"] + ["run", "--model", modelo] + ag.get("args_extra", []) + \
             ["--file", str(archivo_prompt), "Sigue exactamente las instrucciones del archivo adjunto."]
-        r = ejecutar(cmd, cwd=cwd, timeout=cfg["timeout_agente_s"], env=entorno_limpio())
+        r = ejecutar_en_directo(cmd, cwd=cwd, timeout=cfg["timeout_agente_s"], env=entorno_limpio(),
+                                al_linea=al_linea)
         evidencia["ollama_ps"] = ollama_ps(cfg)
         ok2, detalle2 = ollama_disponible(cfg)
         if not ok2:
             raise Bloqueo(f"Ollama dejó de responder durante la tarea: {detalle2}",
                           "Arranca Ollama y ejecuta `python coordinador.py reanudar <issue>`. Los cambios parciales siguen en el worktree.")
     elif ag["proveedor"] == "anthropic":
-        cmd = ag["bin"] + ag.get("args", [])
-        r = ejecutar(cmd, cwd=cwd, timeout=cfg["timeout_agente_s"], stdin_text=prompt, env=entorno_limpio())
+        cmd = ag["bin"] + args_claude_en_directo(ag.get("args", []))
+        r = ejecutar_en_directo(cmd, cwd=cwd, timeout=cfg["timeout_agente_s"], stdin_text=prompt,
+                                env=entorno_limpio(), resumir=resumir_evento_claude, al_linea=al_linea)
     else:
         raise Bloqueo(f"Proveedor desconocido {ag['proveedor']}", "Revisa config.json.")
     return r, evidencia
@@ -817,7 +1065,11 @@ class Procesador:
             self._bloquear(con, numero, Bloqueo(f"Error inesperado: {e}", "Revisa el log y ejecuta `reanudar`.", repr(e)))
             return "bloqueada"
         finally:
+            progreso_quitar(numero)  # sale de Doing (revisión, bloqueo o caída simulada): fuera del panel
             con.close()
+
+    def _paso(self, numero: int, paso: str, limite_s: int | float | None = None) -> None:
+        progreso_paso(numero, paso, limite_s)
 
     def _bloquear(self, con, numero: int, b: Bloqueo) -> None:
         log(f"#{numero}: BLOQUEADA — {b.causa}")
@@ -855,9 +1107,12 @@ class Procesador:
         wt = Path(f["worktree"]) if f["worktree"] else (WORKTREES / f"issue-{numero}")
         actualizar(con, self.repo, numero, agente=agente, titulo=titulo, rama=rama, worktree=str(wt), causa=None,
                    recuperacion=None, intentos=(f["intentos"] or 0) + 1)
+        progreso_iniciar(numero, agente, wt)
+        lim_git = 300
 
         # 1. worktree desde el commit base registrado
         if not paso_hecho(f, "worktree"):
+            self._paso(numero, "worktree", lim_git)
             t0 = time.time()
             with self.git_lock:
                 self.git.run("fetch", "origin", "--prune")
@@ -879,6 +1134,7 @@ class Procesador:
 
         # 2. agente
         if not paso_hecho(f, "agente"):
+            self._paso(numero, "agente", self.cfg["timeout_agente_s"])
             t0 = time.time()
             conflicto = json.loads(f["tiempos"] or "{}").get("conflicto")
             if conflicto:
@@ -900,10 +1156,12 @@ class Procesador:
             if fallo_ci:
                 prompt += ("\nEn el intento anterior la CI del proyecto falló. Corrige la causa sin salirte de los "
                            "archivos permitidos. Extracto del log:\n```\n" + fallo_ci[-4000:] + "\n```\n")
-            r, evid = invocar_agente(self.cfg, agente, wt, prompt, PROMPTS / f"issue-{numero}.md")
-            logp = self._log_archivo(numero, f"agente-{agente}",
-                                     f"CMD: {r.args}\nCODIGO: {r.returncode}\nEVIDENCIA: {json.dumps(evid)}\n"
-                                     f"--- STDOUT ---\n{r.stdout}\n--- STDERR ---\n{r.stderr}")
+            r, evid = invocar_agente(self.cfg, agente, wt, prompt, PROMPTS / f"issue-{numero}.md",
+                                     al_linea=lambda texto: progreso_actividad(numero, texto))
+            logp = self._log_archivo(numero, f"agente-{agente}", redactar(
+                f"CMD: {r.args}\nCODIGO: {r.returncode}\nEVIDENCIA: {json.dumps(evid)}\n"
+                f"--- STDOUT ---\n{r.stdout}\n--- STDERR ---\n{r.stderr}"))
+            progreso_actividad(numero, f"el agente terminó con código {r.returncode}")
             if r.returncode != 0:
                 try:
                     clasificar_fallo_agente(r)
@@ -923,6 +1181,7 @@ class Procesador:
         # 3. verificación: alcance, diff y pruebas
         resultado_pruebas = ""
         if not paso_hecho(f, "commit"):
+            self._paso(numero, "verificada", lim_git if datos["prueba"] == "ci" else self.cfg["timeout_pruebas_s"])
             t0 = time.time()
             cambiados = self.cambios(wt, commit)
             fuera = [c for c in cambiados if not any(fnmatch.fnmatchcase(c, pat) for pat in datos["archivos"])]
@@ -941,6 +1200,7 @@ class Procesador:
                 resultado_pruebas = self.pruebas(numero, wt, datos["prueba"])
             self._marcar(con, numero, "verificada", t0)
             # 4. commit
+            self._paso(numero, "commit", lim_git)
             self.git.run("commit", "-m", f"Issue #{numero}: {titulo}\n\nAgente-IA: {agente}\nCommit-base: {commit}", cwd=wt)
             self._marcar(con, numero, "commit", t0)
             tiempos = json.loads(obtener(con, self.repo, numero)["tiempos"] or "{}")
@@ -952,6 +1212,7 @@ class Procesador:
 
         # 5. push (forzado con lease solo si la rama se rehízo sobre la base actualizada)
         if not paso_hecho(f, "push"):
+            self._paso(numero, "push", lim_git)
             t0 = time.time()
             forzar = bool(json.loads(f["tiempos"] or "{}").get("forzar_push"))
             self.git.run("push", "-u", *(["--force-with-lease"] if forzar else []), "origin", f"{rama}:{rama}", cwd=wt)
@@ -965,6 +1226,7 @@ class Procesador:
 
         # 6. PR única
         if not paso_hecho(f, "pr") or not f["pr_url"]:
+            self._paso(numero, "pr", lim_git)
             t0 = time.time()
             meta = json.loads(f["tiempos"] or "{}")
             cuerpo = self.cuerpo_pr(numero, agente, f, meta)
@@ -977,6 +1239,7 @@ class Procesador:
 
         # 6 bis. CI del proyecto como juez
         if datos["prueba"] == "ci" and not paso_hecho(f, "ci"):
+            self._paso(numero, "ci", self.cfg["ci"].get("timeout_s", 2400))
             t0 = time.time()
             self.traer_rama_remota(numero, wt, rama)
             head = self.git.run("rev-parse", "HEAD", cwd=wt)
@@ -984,6 +1247,7 @@ class Procesador:
             self._marcar(con, numero, "ci", t0)
 
         # 7. review
+        self._paso(numero, "review", 120)
         self.cola.a_review(numero)
         actualizar(con, self.repo, numero, estado="revision", paso="review", pid=0)
         return "revision"
@@ -1052,6 +1316,7 @@ class Procesador:
         limite = time.time() + ci.get("timeout_s", 2400)
         aceptados = {head}
         avisado = ""
+        consultas = 0
         log(f"#{numero}: esperando la CI ({', '.join(sorted(requeridos))}) en la PR #{pr}")
         while True:
             datos = json.loads(self.gh.run("pr", "view", str(pr), "--repo", self.repo,
@@ -1086,6 +1351,10 @@ class Procesador:
                         estado = (c.get("conclusion") or c.get("state") or "").upper()
                         terminado = (c.get("status") or "COMPLETED").upper() == "COMPLETED" and estado not in ("", "PENDING", "EXPECTED")
                         checks[nombre] = (terminado, estado, c.get("detailsUrl") or c.get("targetUrl") or "")
+            consultas += 1
+            progreso_actividad(numero, f"CI: consulta {consultas} de la PR #{pr} · "
+                               + (", ".join(f"{n}={v[1] or 'en curso'}" for n, v in sorted(checks.items()))
+                                  or "checks aún sin resultados"))
             if requeridos <= set(checks) and all(t for t, _, _ in checks.values()):
                 rojos = {n: v for n, v in checks.items() if v[1] not in ("SUCCESS", "NEUTRAL", "SKIPPED")}
                 if not rojos:
@@ -1264,7 +1533,9 @@ def version(cmd: list[str]) -> str:
 
 def redactar(texto: str) -> str:
     texto = re.sub(r"(sk-ant-[\w-]{4})[\w-]+", r"\1…", texto)
-    texto = re.sub(r"(gh[pousr]_[A-Za-z0-9]{2})[A-Za-z0-9]+", r"\1…", texto)
+    texto = re.sub(r"(gh[pousr]_[A-Za-z0-9]{2})[A-Za-z0-9_]+", r"\1…", texto)
+    texto = re.sub(r"(github_pat_[A-Za-z0-9]{2})[A-Za-z0-9_]+", r"\1…", texto)
+    texto = re.sub(r"(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}", r"\1***", texto, flags=re.I)
     return re.sub(r"(Token:\s*)\S+", r"\1***", texto)
 
 
@@ -1362,8 +1633,15 @@ def cmd_probar(a) -> None:
     prompt = f"Crea el archivo {archivo} en el directorio actual con exactamente el texto LISTO (sin nada más). No hagas nada más."
     antes = ollama_ps(cfg) if cfg["agentes"][nombre]["proveedor"] == "ollama" else []
     t0 = time.time()
+    vivo = carpeta / "salida-en-directo.log"
+
+    def al_linea(texto):
+        if texto:
+            with open(vivo, "a", encoding="utf-8") as fh:
+                fh.write(f"[{dt.datetime.now():%H:%M:%S}] {texto}\n")
     try:
-        r, evid = invocar_agente(cfg, nombre, carpeta, prompt, carpeta.parent / f"{carpeta.name}.prompt.md")
+        r, evid = invocar_agente(cfg, nombre, carpeta, prompt, carpeta.parent / f"{carpeta.name}.prompt.md",
+                                 al_linea=al_linea)
     except Bloqueo as b:
         sys.exit(f"FALLO: {b.causa}\n{b.recuperacion}")
     dur = round(time.time() - t0, 1)
@@ -1376,7 +1654,7 @@ def cmd_probar(a) -> None:
         print(f"Ollama api/ps antes: {antes or 'ninguno'}  después: {evid.get('ollama_ps') or 'ninguno'}")
     if nombre == "claude":
         try:
-            j = json.loads(r.stdout)
+            j = resultado_claude(r.stdout)
             print(f"Claude: is_error={j.get('is_error')} coste_informado={j.get('total_cost_usd')} (con suscripción es informativo)")
         except Exception:
             pass

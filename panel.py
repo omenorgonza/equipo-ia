@@ -126,6 +126,99 @@ def prs_registro(nombre: str) -> dict[int, str]:
         con.close()
 
 
+UMBRAL_ATASCO_S = 300   # sin actividad del agente (o de la CI) durante más de esto → «posible atasco»
+LINEAS_PROGRESO = 60
+
+
+def leer_progreso(nombre: str) -> dict[str, dict]:
+    """Entradas de estado/progreso.json escritas por un coordinador vivo (las de un proceso caído no cuentan)."""
+    p = E.PROYECTOS / nombre / "estado" / "progreso.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(d, dict) or not C.pid_vivo(int(d.get("pid") or 0)):
+        return {}
+    return {k: v for k, v in (d.get("tareas") or {}).items() if isinstance(v, dict)}
+
+
+def tiempos_pasos(nombre: str) -> dict[str, list[tuple[int, float]]]:
+    """Duración (s) de cada paso en las tareas registradas, de `tiempos` en registro.db."""
+    db = E.PROYECTOS / nombre / "estado" / "registro.db"
+    if not db.exists():
+        return {}
+    con = sqlite3.connect(str(db))
+    salida: dict[str, list[tuple[int, float]]] = {}
+    try:
+        for issue, tiempos in con.execute("SELECT issue, tiempos FROM tareas"):
+            try:
+                t = json.loads(tiempos or "{}")
+            except ValueError:
+                continue
+            for paso, v in t.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    salida.setdefault(paso, []).append((issue, float(v)))
+    except sqlite3.Error:
+        return {}
+    finally:
+        con.close()
+    return salida
+
+
+def archivos_cambiados(worktree: str | None) -> int | None:
+    if not worktree or not Path(worktree).is_dir():
+        return None
+    try:
+        out = E.git("status", "--porcelain", cwd=Path(worktree), comprobar=False)
+    except Exception:  # noqa: BLE001
+        return None
+    return len([l for l in out.splitlines() if l.strip()])
+
+
+def progreso_tareas(nombre: str, cfg: dict) -> dict[int, dict]:
+    """Progreso en directo de cada tarea en curso: paso, minutos, límite, última actividad y archivos cambiados."""
+    tareas = leer_progreso(nombre)
+    if not tareas:
+        return {}
+    umbral = float(cfg.get("umbral_atasco_s") or UMBRAL_ATASCO_S)
+    ahora = time.time()
+    tiempos = tiempos_pasos(nombre)
+    salida = {}
+    for e in tareas.values():
+        try:
+            n = int(e["issue"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        paso = e.get("paso") or "?"
+        inactivo = max(0.0, ahora - float(e.get("ultima_actividad_ts") or ahora))
+        limite = e.get("limite_s")
+        previos = [s for i, s in tiempos.get(paso, []) if i != n]
+        salida[n] = {
+            "numero": n, "agente": e.get("agente"), "paso": paso,
+            "minutos": int((ahora - float(e.get("inicio_paso_ts") or ahora)) // 60),
+            "minutos_tarea": int((ahora - float(e.get("inicio_tarea_ts") or ahora)) // 60),
+            "limite_s": limite, "limite_min": round(limite / 60) if limite else None,
+            "inicio_tarea": e.get("inicio_tarea"), "inicio_paso": e.get("inicio_paso"),
+            "ultima_actividad": e.get("ultima_actividad"), "inactivo_s": int(inactivo),
+            "ultima_linea": C.redactar(str(e.get("ultima_linea") or ""))[:300],
+            "archivos_cambiados": archivos_cambiados(e.get("worktree")),
+            "estimado_min": round(sum(previos) / len(previos) / 60, 1) if previos else None,
+            "atasco": inactivo > umbral, "umbral_atasco_s": int(umbral)}
+    return salida
+
+
+def log_progreso(nombre: str, numero: int) -> dict:
+    """Últimas líneas de estado/agentes/issue-N.log (vuelven a filtrarse por si acaso) y el progreso actual."""
+    p = E.PROYECTOS / nombre / "estado" / "agentes" / f"issue-{numero}.log"
+    if p.exists():
+        lineas = p.read_text(encoding="utf-8", errors="replace").splitlines()[-LINEAS_PROGRESO:]
+        texto = C.redactar("\n".join(lineas))
+    else:
+        texto = "(sin salida del agente todavía)"
+    prog = progreso_tareas(nombre, E.cfg_proyecto(nombre)).get(numero)
+    return {"numero": numero, "log": texto, "progreso": prog, "en_curso": prog is not None}
+
+
 def estado_proyecto(nombre: str, forzar=False) -> dict:
     cfg = E.cfg_proyecto(nombre)
     repos = cfg.get("repos") or [cfg.get("repo")]
@@ -133,7 +226,13 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
     salida = {"nombre": nombre, "descripcion": cfg.get("descripcion", ""), "color": E.color_proyecto(nombre),
               "repos": [], "tablero": tb.get("url"),
               "activo": E.coordinador_activo(nombre), "columnas": {e: 0 for e in T.ESTADOS}, "atencion": [],
-              "tarjetas": {}, "error": None, "pruebas": pruebas_proyecto(cfg)}
+              "tarjetas": {}, "error": None, "pruebas": pruebas_proyecto(cfg), "progreso": []}
+    try:
+        prog = progreso_tareas(nombre, cfg)
+    except Exception:  # noqa: BLE001 — el panel nunca se cae por el progreso
+        prog = {}
+    repo_cola = (cfg.get("repo") or "").lower()
+    vistos: set[int] = set()
 
     def items():
         t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
@@ -160,6 +259,14 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
             tarjeta = {"numero": it["numero"], "titulo": it["titulo"], "url": it["url"], "prioridad": it["prioridad"],
                        "bloqueo": it["bloqueo"], "pr": prs.get(it["numero"]), "repo": it["repo"],
                        "agente": next((x.split(":")[1] for x in it["etiquetas"] if x.startswith("agent:")), None)}
+            pg = prog.get(it["numero"]) if (not repo_cola or (it["repo"] or "").lower() == repo_cola) else None
+            if pg is not None:
+                vistos.add(it["numero"])
+                # To Do: la caché del tablero (60 s) aún no ha visto el paso a Doing. Fuera de Doing, no se muestra.
+                if e in (T.DOING, T.TODO):
+                    pg = {**pg, "titulo": it["titulo"], "url": it["url"]}
+                    tarjeta["progreso"] = pg
+                    salida["progreso"].append(pg)
             grupos.setdefault(e, []).append(tarjeta)
             if it["bloqueo"]:
                 salida["atencion"].append({"nivel": "alta", "tipo": "bloqueo", "numero": it["numero"],
@@ -190,6 +297,18 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
     else:
         salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "texto": "El proyecto aún no tiene tablero",
                                    "url": None})
+    for n, pg in prog.items():  # en curso pero la tarjeta aún no está en la caché del tablero
+        if n not in vistos:
+            salida["progreso"].append({**pg, "titulo": "", "url": None})
+    salida["progreso"].sort(key=lambda x: x["numero"])
+    for pg in salida["progreso"]:
+        if pg["atasco"]:
+            mins = pg["inactivo_s"] // 60
+            hace = f"{mins} min" if mins else f"{pg['inactivo_s']} s"
+            salida["atencion"].append({"nivel": "alta", "tipo": "atasco", "numero": pg["numero"], "url": pg["url"],
+                                       "progreso": True,
+                                       "texto": f"#{pg['numero']} posible atasco: sin actividad desde hace {hace} "
+                                                f"(paso {pg['paso']}, {pg['agente']})"})
 
     with ThreadPoolExecutor(max_workers=4) as ex:
         salida["repos"] = list(ex.map(datos_repo, repos))
@@ -437,6 +556,9 @@ class Manejador(BaseHTTPRequestHandler):
         m = re.match(r"^/api/proyecto/([a-z0-9-]+)/log$", ruta)
         if m and m.group(1) in E.proyectos():
             return self._json({"log": log_proyecto(m.group(1))})
+        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/progreso/(\d{1,9})$", ruta)
+        if m and m.group(1) in E.proyectos():
+            return self._json(log_progreso(m.group(1), int(m.group(2))))
         self._json({"error": "no encontrado"}, 404)
 
     def do_POST(self):

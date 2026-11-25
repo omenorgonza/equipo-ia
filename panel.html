@@ -114,6 +114,19 @@
                    border: 2px solid transparent; }
   .paleta button.sel { border-color: var(--ink); box-shadow: 0 0 0 1px var(--card); }
   .paleta button:hover { border-color: var(--muted); }
+  /* Progreso en directo de las tareas en Doing; ámbar = posible atasco (sin actividad > umbral). */
+  .progs { display: flex; flex-direction: column; gap: 6px; }
+  .prog { font-size: 13px; padding: 7px 10px; border-radius: 8px; background: var(--card); border: 1px solid var(--line);
+          display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .prog .t { flex: 1; min-width: 200px; }
+  .prog .ult { width: 100%; color: var(--muted); font-size: 12px; font-family: ui-monospace, monospace;
+               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .prog.atasco { background: #fdf3dc; border-color: var(--warn); }
+  .prog.atasco .aviso { color: #7a4f0a; font-weight: 600; }
+  .at.atasco { background: #fdf3dc; }
+  @media (prefers-color-scheme: dark) {
+    .prog.atasco, .at.atasco { background: #3a2e14; } .prog.atasco .aviso { color: #f3cf7a; }
+  }
 </style>
 </head>
 <body>
@@ -206,6 +219,12 @@
   <h2>Proyectos</h2>
   <div class="grid" id="proyectos"></div>
   <section id="logbox" hidden><h2 id="log-t">Log</h2><pre id="log-pre"></pre></section>
+  <section id="progbox" hidden>
+    <h2 id="prog-t">Progreso</h2>
+    <div class="acciones"><span class="hint" id="prog-info"></span>
+      <button class="mini" onclick="cerrarProgreso()">Cerrar</button></div>
+    <pre id="prog-pre"></pre>
+  </section>
   <div class="toast" id="toast"></div>
 </main>
 <script>
@@ -247,12 +266,14 @@ function pintar() {
   document.getElementById("puesta-l").innerHTML = puesta.map(fila).join("");
   const urgente = at.filter(a => a.tipo !== "instalacion");
   document.getElementById("atencion").innerHTML = urgente.length ? urgente.map(a => `
-    <div class="at ${a.nivel}"><span class="p c-${esc(a.color)}">${esc(a.proyecto)}</span>
+    <div class="at ${a.nivel} ${a.tipo === "atasco" ? "atasco" : ""}"><span class="p c-${esc(a.color)}">${esc(a.proyecto)}</span>
       <span class="t">${a.url ? `<a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.texto)}</a>` : esc(a.texto)}</span>
+      ${a.progreso ? `<button class="mini" onclick="verProgreso('${a.proyecto}', ${a.numero})">Ver progreso</button>` : ""}
       ${a.reintentar ? `<button class="mini" onclick="reintentar('${a.proyecto}', ${a.numero})">Reintentar con el agente</button>` : ""}
       ${a.reanudar ?`<button class="mini" onclick="reanudar('${a.proyecto}', ${a.numero})" title="Continúa desde el paso pendiente sin volver a llamar al agente">Reanudar</button>` : ""}
     </div>`).join("") : `<div class="vacio">Nada urgente. El equipo puede seguir solo. 🎉</div>`;
 
+  const abiertos = new Set([...document.querySelectorAll("details[data-p]")].filter(d => d.open).map(d => d.dataset.p));
   ps.sort((a, b) => b.atencion.filter(x => x.nivel === "alta").length - a.atencion.filter(x => x.nivel === "alta").length
                     || a.nombre.localeCompare(b.nombre));
   document.getElementById("proyectos").innerHTML = ps.map(p => {
@@ -273,7 +294,14 @@ function pintar() {
         return `<div class="repo"><span class="dot ${ci || ""}" title="CI ${esc(ci || "sin datos")}"></span>
           <a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.repo)}</a>
           <span class="pr">${r.rama}${al ? ` · ${al} aviso(s)` : ""}</span></div>`; }).join("")}</div>
-      ${activas.length ? `<details><summary>${activas.length} tarea(s) en curso o pendientes</summary>
+      ${(p.progreso || []).length ? `<div class="progs">${p.progreso.map(pg => `
+        <div class="prog ${pg.atasco ? "atasco" : ""}">
+          <span class="t">${pg.url ? `<a href="${esc(pg.url)}" target="_blank" rel="noopener" title="${esc(pg.titulo)}">#${pg.numero}</a>` : `#${pg.numero}`}
+            · ${esc(textoProgreso(pg))}${pg.atasco ? ` · <span class="aviso">posible atasco</span>` : ""}</span>
+          <button class="mini" onclick="verProgreso('${p.nombre}', ${pg.numero})">Ver progreso</button>
+          ${pg.ultima_linea ? `<span class="ult" title="${esc(pg.ultima_linea)}">${esc(pg.ultima_linea)}</span>` : ""}
+        </div>`).join("")}</div>` : ""}
+      ${activas.length ? `<details data-p="${esc(p.nombre)}" ${abiertos.has(p.nombre) ? "open" : ""}><summary>${activas.length} tarea(s) en curso o pendientes</summary>
         ${activas.map(t => `<div class="tarj"><span>${esc(CORTO[t.e] || t.e)}</span>
           <a href="${esc(t.pr || t.url)}" target="_blank" rel="noopener">#${t.numero} ${esc(t.titulo)}</a>
           <span class="pr">${esc((t.prioridad || "").slice(0,2))} ${esc(t.agente || "")}</span></div>`).join("")}</details>` : ""}
@@ -298,6 +326,45 @@ async function reanudar(p, n) { const r = await post(`/api/proyecto/${p}/reanuda
 async function verLog(p) { const r = await (await fetch(`/api/proyecto/${p}/log`)).json();
   document.getElementById("logbox").hidden = false; document.getElementById("log-t").textContent = `Log del equipo · ${p}`;
   document.getElementById("log-pre").textContent = r.log; document.getElementById("logbox").scrollIntoView({behavior: "smooth"}); }
+
+function hace(s) { return s < 60 ? `${s} s` : s < 3600 ? `${Math.floor(s / 60)} min` : `${Math.floor(s / 3600)} h ${Math.floor(s % 3600 / 60)} min`; }
+function textoProgreso(pg) {
+  const n = pg.archivos_cambiados;
+  return [pg.agente || "?", `paso ${pg.paso}`,
+          `${pg.minutos} min` + (pg.limite_min ? ` (límite ${pg.limite_min})` : ""),
+          `última actividad hace ${hace(pg.inactivo_s)}`,
+          n == null ? null : n === 1 ? "1 archivo cambiado" : `${n} archivos cambiados`,
+          pg.estimado_min != null ? `estimado ~${pg.estimado_min} min` : null].filter(Boolean).join(" · ");
+}
+let progAbierto = null, progTimer = null;
+async function verProgreso(p, n) {
+  progAbierto = {p, n};
+  clearInterval(progTimer);
+  document.getElementById("progbox").hidden = false;
+  document.getElementById("prog-t").textContent = `Progreso · ${p} · #${n}`;
+  await refrescarProgreso();
+  document.getElementById("progbox").scrollIntoView({behavior: "smooth"});
+  progTimer = setInterval(refrescarProgreso, 5000);   // solo mientras está abierto
+}
+async function refrescarProgreso() {
+  if (!progAbierto) return;
+  const {p, n} = progAbierto;
+  let r;
+  try { r = await (await fetch(`/api/proyecto/${p}/progreso/${n}`)).json(); }
+  catch (e) { document.getElementById("prog-info").textContent = "No se pudo contactar con el panel"; return; }
+  if (!progAbierto || progAbierto.p !== p || progAbierto.n !== n) return;
+  const pre = document.getElementById("prog-pre");
+  const abajo = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+  pre.textContent = r.log || "";
+  if (abajo) pre.scrollTop = pre.scrollHeight;
+  document.getElementById("prog-info").textContent = r.progreso
+    ? `${textoProgreso(r.progreso)}${r.progreso.atasco ? " · posible atasco" : ""} · se actualiza cada 5 s`
+    : "La tarea ya no está en Doing · últimas líneas del log";
+}
+function cerrarProgreso() {
+  progAbierto = null; clearInterval(progTimer); progTimer = null;
+  document.getElementById("progbox").hidden = true;
+}
 
 function abrirSecreto(p) {
   const pr = (datos.proyectos || []).find(x => x.nombre === p) || {repos: []};
@@ -394,6 +461,8 @@ async function seguir(id) {
 
 cargar(false);
 setInterval(() => cargar(false), 60000);
+// En directo: con alguna tarea en Doing, el progreso se refresca cada 10 s (el tablero sigue en caché).
+setInterval(() => { if (datos && datos.proyectos.some(p => (p.progreso || []).length)) cargar(false); }, 10000);
 </script>
 </body>
 </html>
