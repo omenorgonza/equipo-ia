@@ -8,6 +8,8 @@ permissions:
   issues: read
 jobs:
   al-tablero:
+    # Solo issues abiertas por el dueño del repo: en un repo público, cualquiera puede abrir issues.
+    if: github.event.issue.user.login == github.repository_owner
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
