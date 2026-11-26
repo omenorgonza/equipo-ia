@@ -137,7 +137,8 @@ Un tablero creado sin plantilla y aún vacío se sustituye con `python3 equipo.p
 ### La CI del proyecto como juez (`--prueba ci`)
 
 En proyectos con CI propia (family-finance: job `tests`), el coordinador no ejecuta pruebas en tu PC:
-sube la rama, abre la PR como **borrador** y espera a la CI. Verde → PR lista y tarjeta en Testing / Review.
+sube la rama, abre la PR como **borrador** y espera a la CI. Verde → revisión entre agentes → PR lista y tarjeta
+en Testing / Review.
 Rojo → Bloqueo con el log; «Reintentar con el agente» le pasa el extracto del log del fallo.
 
 - **PR con conflictos con la base**: GitHub no lanza la CI, así que no se espera en vano. En cuanto la API REST
@@ -148,6 +149,45 @@ Rojo → Bloqueo con el log; «Reintentar con el agente» le pasa el extracto de
 - **Commits ajenos en la rama** (p. ej. el TL resolviendo conflictos): cuenta la CI del HEAD remoto de la PR
   (`headRefOid`) siempre que descienda del commit del agente. `reanudar N --desde ci` hace antes
   `git pull --ff-only` de la rama remota en el worktree.
+
+### Revisión entre agentes (paso `revision-agentes`)
+
+Antes de que una PR llegue a **Testing / Review**, otro agente la revisa en **dos rondas como mínimo**. La PR sigue en
+borrador (proyectos con `--prueba ci`) hasta que la revisión la aprueba. Configuración en `equipo.json` (o en el
+`config.json` del proyecto; sin nada escrito se aplican estos valores):
+
+```json
+"revision": {"rondas_minimas": 2, "rondas_maximas": 3, "revisores": {"local": "claude", "claude": "claude"}, "senior": "claude"}
+```
+
+- **Revisor**: el que diga `revisores` para ese autor; si no hay, otro agente activo distinto del autor. Con
+  `claude → claude` es una sesión nueva. Arranca sin la conversación del autor: recibe objetivo, criterios, diff,
+  resultado de la CI o de las pruebas, lecciones del autor y hallazgos anteriores. Va en **solo lectura**; si
+  modifica archivos o lo intenta, o su veredicto no es un JSON válido, la ronda no cuenta (se descarta lo que haya
+  escrito y se repite una vez; a la segunda, Bloqueo). Los revisores respetan `max_por_proveedor`.
+- **Rondas**: cada una se publica en la PR («Revisión 1/2 · revisor: claude»). Con hallazgos **bloqueantes**, el autor
+  los recibe y corrige, se repiten las pruebas y la CI, y va la siguiente ronda. Los **menores** se anotan y no frenan.
+  La ronda 2 se hace siempre. Si entran commits nuevos tras aprobarse, hay rondas nuevas.
+- **Escalado**: si tras la ronda 2 quedan bloqueantes y el autor no es el `senior`, la etiqueta cambia a la del senior,
+  se explica en la issue y el senior sigue en la misma rama con el historial. Puede delegar hasta 3 subtareas en el
+  junior: issues hijas, sin autorizar hasta que Óscar las pase a To Do.
+- **Rondas agotadas** (`rondas_maximas`) → Bloqueo con los hallazgos pendientes. `reanudar N --desde agente` se los pasa
+  al agente; si los corriges tú en el worktree, `reanudar N`. `reanudar N --desde revision-agentes` pide rondas nuevas.
+- **Lecciones**: cada hallazgo bloqueante corregido (la ronda siguiente ya no marca ese archivo) se añade a
+  `lecciones/<autor>.md` y a su skill.
+- La descripción de la PR lleva la sección «Revisión entre agentes» con rondas, revisores y resultado.
+
+**Revisión previa obligatoria (p. ej. AcademIA)**, en el `config.json` del proyecto:
+
+```json
+"revision": {"antes_de_pr": true, "pruebas_locales": ["phpunit", "vitest"], "intensiva_cada": 3}
+```
+
+- Las rondas van **antes de subir la rama y abrir la PR**, sobre el diff local y con las pruebas en el worktree: en la
+  ronda 1, la de la issue; desde la 2, además todas las de `pruebas_locales` (claves de `pruebas`). Una prueba en rojo
+  es un hallazgo bloqueante. Si alguna no se puede ejecutar, o no hay ninguna, **no se abre la PR**: Bloqueo.
+- La descripción incluye las rondas, comandos ejecutados, resultados y riesgos residuales.
+- `intensiva_cada: 3` añade una ronda intensiva (arquitectura, seguridad, deuda) antes de la 3.ª, 6.ª, 9.ª… PR.
 
 ### El propio equipo como proyecto (`omenorgonza/equipo-ia`)
 
@@ -242,7 +282,7 @@ crea las etiquetas `agent:claude agent:local ready running review blocked` y esc
 | Procesar la cola una vez | `python coordinador.py una-vez` |
 | Consultar estado | `python coordinador.py estado` |
 | Reanudar una issue | `python coordinador.py reanudar 7` (o volver a poner `ready` en GitHub) |
-| Repetir un paso | `python coordinador.py reanudar 7 --desde agente` (`worktree`, `agente`, `verificada`, `commit`, `push`, `pr`, `ci`) |
+| Repetir un paso | `python coordinador.py reanudar 7 --desde agente` (`worktree`, `agente`, `verificada`, `commit`, `push`, `pr`, `ci`, `revision-agentes`) |
 
 Reglas que aplica el coordinador:
 - Solo issues **abiertas, con `ready`, del autor autorizado y del repo configurado**; las demás se ignoran.

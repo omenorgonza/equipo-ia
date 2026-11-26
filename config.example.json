@@ -81,5 +81,14 @@
       "import glob,sys; sys.exit(0 if glob.glob('docs/*.md') else 1)"
     ]
   },
-  "contexto_minimo_local": 16384
+  "contexto_minimo_local": 16384,
+  "revision": {
+    "rondas_minimas": 2,
+    "rondas_maximas": 3,
+    "revisores": {
+      "local": "claude",
+      "claude": "claude"
+    },
+    "senior": "claude"
+  }
 }

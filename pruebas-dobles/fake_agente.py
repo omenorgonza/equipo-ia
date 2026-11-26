@@ -18,13 +18,50 @@ else:
 if modo == "cuota":
     print("Claude AI usage limit reached|1700000000", file=sys.stderr)
     sys.exit(1)
-if modo == "nada":
-    print("He pensado en la tarea pero no he escrito nada.")
-    sys.exit(0)
 def evento(ev: dict, texto: str) -> None:
     """claude (stdin) emite eventos stream-json; opencode (--file), texto tal cual. Siempre con flush."""
     print(texto if "--file" in a else json.dumps(ev), flush=True)
 
+
+def responder(texto: str) -> None:
+    evento({"type": "result", "subtype": "success", "is_error": False, "result": texto, "total_cost_usd": 0.0}, texto)
+
+
+if "=== REVISIÓN ENTRE AGENTES" in prompt:
+    # Revisor. La marca [REV:…] del objetivo elige el guion: corrige (falla la ronda 1), escala (fallan la 1 y la 2),
+    # agota (fallan todas), edita / intenta (escribe, o lo intenta, la primera vez), ilegible (primer veredicto roto).
+    import re as _re
+    if {"acceptEdits", "--auto", "Read,Edit,Write,Glob,Grep"} & set(a):
+        print("EL REVISOR TIENE PERMISOS DE ESCRITURA:", a, file=sys.stderr)
+        sys.exit(4)
+    ronda = int(_re.search(r"ronda (\d+) de", prompt).group(1))
+    issue = _re.search(r"issue #(\d+)", prompt).group(1)
+    guion = (_re.search(r"\[REV:(\w+)\]", prompt) or [None, ""])[1]
+    m = _re.search(r"Crea el archivo (docs/\S+?\.md)", prompt)
+    ruta = m.group(1) if m else "src/x.py"
+    marca = Path(os.environ["FAKE_GH_STATE"] + f".rev-{guion}-{issue}")
+    primera = not marca.exists()
+    if guion in ("edita", "intenta", "ilegible") and primera:
+        marca.write_text("1")
+        if guion == "ilegible":
+            responder("Me parece bien todo, sin más.")
+            sys.exit(0)
+        if guion == "edita":
+            Path("escrito-por-el-revisor.txt").write_text("no debería\n")
+            Path(ruta).write_text("# Cambiado por el revisor\n")
+        else:
+            evento({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": ruta}}]}}, f"Edit {ruta}")
+    falla = {"corrige": ronda == 1, "escala": ronda <= 2, "agota": True}.get(guion, False)
+    hallazgos = [{"gravedad": "bloqueante", "archivo": ruta, "detalle": f"Falta la explicación ({guion}, ronda {ronda}), @oscar #1"}] \
+        if falla else [{"gravedad": "menor", "archivo": ruta, "detalle": "El título podría ser más claro"}]
+    responder("He revisado el cambio.\n```json\n" + json.dumps(
+        {"veredicto": "cambios" if falla else "aprobada", "hallazgos": hallazgos,
+         "riesgos": ["Sin prueba de carga"]}, ensure_ascii=False) + "\n```")
+    sys.exit(0)
+if modo == "nada":
+    print("He pensado en la tarea pero no he escrito nada.")
+    sys.exit(0)
 
 if "PASO-A-PASO" in prompt:
     # Progreso en directo: escribe poco a poco, tarda unos segundos y luego se queda callado (posible atasco).
@@ -83,4 +120,9 @@ elif "Crea el archivo docs/" in prompt:
 elif "notas-ensayo" in prompt:
     Path("docs").mkdir(exist_ok=True)
     Path("docs/notas-ensayo.md").write_text("# Notas del ensayo\n\nCompletada tras recuperar Ollama.\n")
-print(json.dumps({"type": "result", "is_error": False, "result": "hecho", "total_cost_usd": 0.0}))
+resultado = "hecho"
+if "ha escalado a ti" in prompt and "[REV:escala]" in prompt:  # el senior delega una parte en el junior
+    resultado += "\n" + json.dumps({"subtareas": [{
+        "titulo": "Subtarea delegada al junior", "objetivo": "Crea el archivo docs/delegada.md con un título.",
+        "archivos": ["docs/delegada.md"], "criterios": ["existe docs/delegada.md"]}]})
+print(json.dumps({"type": "result", "is_error": False, "result": resultado, "total_cost_usd": 0.0}))
