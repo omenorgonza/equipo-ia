@@ -1674,11 +1674,7 @@ class Procesador:
             elif antes:  # cada ronda de revisión ejecuta las pruebas en el worktree y guarda la evidencia
                 resultado_pruebas = "Pruebas locales ejecutadas en cada ronda: ver «Revisión entre agentes»."
             else:
-                try:
-                    resultado_pruebas = self.pruebas(numero, wt, datos["prueba"])
-                except Bloqueo as b:
-                    b.culpa = True
-                    raise
+                resultado_pruebas = self.pruebas(numero, wt, datos["prueba"])  # culpa solo si quedan en rojo
             self._marcar(con, numero, "verificada", t0)
             # 4. commit
             self._paso(numero, "commit", lim_git)
@@ -1933,7 +1929,10 @@ class Procesador:
         p = self.correr_prueba(numero, wt, clave)
         if p["estado"] != "ok":
             raise Bloqueo(f"Pruebas fallidas ({clave}, código {p['codigo']})",
-                          "Corrige en el worktree o reformula la tarea y ejecuta `reanudar`.", f"Log: {p['log']}")
+                          "Corrige en el worktree o reformula la tarea y ejecuta `reanudar`.", f"Log: {p['log']}",
+                          # solo unas pruebas en rojo son culpa del agente; sin ejecutar (126/127, tiempo agotado,
+                          # clave no declarada) es un fallo de entorno: ni reintento ni escalado
+                          culpa=p["estado"] == "rojo")
         return f"`{clave}`: `{p['cmd']}` → código 0 en {p['dur']}s\n\n```\n{p['salida']}\n```"
 
     # ---- revisión entre agentes
@@ -2230,7 +2229,11 @@ class Procesador:
                               "Revierte esos archivos en el worktree (o amplía 'Archivos permitidos') y ejecuta `reanudar`.")
             self.git.run("add", "-A", cwd=wt)
             if datos["prueba"] != "ci" and not self.cfg["revision"]["antes_de_pr"]:
-                resultado = self.pruebas(numero, wt, datos["prueba"])
+                try:
+                    resultado = self.pruebas(numero, wt, datos["prueba"])
+                except Bloqueo as b:
+                    b.culpa = False  # la corrección tras la revisión tiene su propio escalado (#24)
+                    raise
                 t = self._tiempos(con, numero)
                 t["pruebas"] = resultado
                 actualizar(con, self.repo, numero, tiempos=json.dumps(t))

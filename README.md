@@ -249,7 +249,8 @@ equipo no se para a la primera ni hace falta tocar etiquetas, worktrees ni el re
 
 Cuenta como culpa del agente: terminar con código ≠ 0 o por tiempo máximo, no modificar nada, el diff fuera de
 «Archivos permitidos» y las pruebas de la issue en rojo. **No** se reintenta ni se escala (Bloqueo como hasta ahora):
-cuota agotada, Ollama caído, ejecutable no encontrado, permisos, red o fallos de la revisión entre agentes (que tiene
+cuota agotada, Ollama caído, ejecutable no encontrado, permisos, red, pruebas que no llegan a ejecutarse (código
+126/127, tiempo de pruebas agotado o clave no declarada) o fallos de la revisión entre agentes (que tiene
 su propio escalado). Cada fallo del junior anota una lección pendiente en `estado/lecciones-pendientes.md`. Si el
 senior no está activo, tras el segundo fallo del junior queda en Bloqueo.
 
