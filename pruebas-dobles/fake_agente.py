@@ -114,6 +114,23 @@ elif "Crea el archivo docs/" in prompt:
     import re as _re
     ruta = _re.search(r"Crea el archivo (docs/\S+?\.md)", prompt).group(1)
     Path(ruta).parent.mkdir(parents=True, exist_ok=True)
+    # Guion de fallos del autor (marca [FALLO:…] del objetivo): fuera1 (escribe fuera de alcance la primera vez),
+    # junior (el agente local falla siempre), todos (falla cualquiera), cuota (el local agota la cuota).
+    fallo = (_re.search(r"\[FALLO:(\w+)\]", prompt) or [None, ""])[1]
+    local = "--file" in a
+    if fallo == "fuera1":
+        n_issue = _re.search(r"issue #(\d+)", prompt).group(1)
+        marca = Path(os.environ["FAKE_GH_STATE"] + f".fallo-fuera1-{n_issue}")
+        if not marca.exists():
+            marca.write_text("1")
+            Path("fuera-de-alcance.txt").write_text("no debería llegar al commit\n")
+    elif fallo == "cuota" and local:
+        print("Claude AI usage limit reached|1700000000", file=sys.stderr)
+        sys.exit(1)
+    elif fallo == "todos" or (fallo == "junior" and local):
+        Path(ruta).write_text("# A medias\n")
+        print("Error: no he sabido terminar la tarea", file=sys.stderr)
+        sys.exit(1)
     previo = Path(ruta).read_text() if Path(ruta).exists() else ""
     Path(ruta).write_text(previo + "# Hecho por el equipo\n" if not previo else previo + "Corregido tras la revisión de la CI.\n")
     Path(os.environ.get("FAKE_AGENTE_LOG", "/dev/null")).open("a").write(ruta + "\n")
