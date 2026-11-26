@@ -235,6 +235,31 @@ borrador (proyectos con `--prueba ci`) hasta que la revisión la aprueba. Config
 - La descripción incluye las rondas, comandos ejecutados, resultados y riesgos residuales.
 - `intensiva_cada: 3` añade una ronda intensiva (arquitectura, seguridad, deuda) antes de la 3.ª, 6.ª, 9.ª… PR.
 
+### Reintento y escalado automáticos cuando el junior falla
+
+Si el agente junior (cualquiera que no sea `revision.senior`, normalmente `local`) falla la tarea **por su culpa**, el
+equipo no se para a la primera ni hace falta tocar etiquetas, worktrees ni el registro:
+
+1. **Reintento**: se descarta lo que dejó el intento (los cambios sin confirmar del worktree, incluidos los archivos
+   fuera de alcance, que nunca llegan al commit) y el junior lo intenta otra vez. Su prompt lleva la causa del fallo.
+2. **Escalado**: si vuelve a fallar, la tarea pasa al `senior` (claude): cambia la etiqueta (`agent:claude`), el campo
+   **Agente** de la issue y se comenta en ella con los intentos. El senior parte de un worktree limpio en la misma rama.
+3. **Si también falla el senior** → Bloqueo como siempre, con el historial de los intentos en el campo Bloqueo, el
+   comentario y el log `bloqueo`.
+
+Cuenta como culpa del agente: terminar con código ≠ 0 o por tiempo máximo, no modificar nada, el diff fuera de
+«Archivos permitidos» y las pruebas de la issue en rojo. **No** se reintenta ni se escala (Bloqueo como hasta ahora):
+cuota agotada, Ollama caído, ejecutable no encontrado, permisos, red, pruebas que no llegan a ejecutarse (código
+126/127, tiempo de pruebas agotado o clave no declarada) o fallos de la revisión entre agentes (que tiene
+su propio escalado). Cada fallo del junior anota una lección pendiente en `estado/lecciones-pendientes.md`. Si el
+senior no está activo, tras el segundo fallo del junior queda en Bloqueo.
+
+Para desactivarlo (un fallo → Bloqueo, como antes), en `equipo.json` o en el `config.json` del proyecto:
+
+```json
+"escalar_fallos": false
+```
+
 ### El propio equipo como proyecto (`omenorgonza/equipo-ia`)
 
 El código del equipo vive en su propio repositorio y se gestiona como cualquier otro proyecto: tarjetas en

@@ -345,6 +345,114 @@ for it in tablero["items"].values():
         assert "aprobada** tras" in p["body"], p["body"]
 PY
 
+echo "== 4 septies. Fallos del junior: reintento automático, escalado al senior y cuándo no se reintenta"
+cat >> "$S.revlib/revlib.py" <<'PY'
+import subprocess
+def logs_agente(agente):  # veces que se invocó al agente como autor (salida de `una-vez` en LOGU)
+    return open(os.environ["LOGU"], encoding="utf-8").read().count(f"#{n}: invocando agente '{agente}'\n")
+def pendientes(agente):
+    p = "proyectos/demo/estado/lecciones-pendientes.md"
+    return (open(p, encoding="utf-8").read() if os.path.exists(p) else "").count(f"· {agente} · issue #{n}\n")
+def en_rama(ruta=None):
+    rama = f"agente/local/issue-{n}"; rem = os.environ["FAKE_GH_REMOTOS"] + "/demo-app.git"
+    if ruta is None:
+        return subprocess.run(["git", "-C", rem, "ls-tree", "-r", "--name-only", rama], capture_output=True, text=True).stdout.split()
+    return subprocess.run(["git", "-C", rem, "show", f"{rama}:{ruta}"], capture_output=True, text=True).stdout
+PY
+nueva_fallo() {  # nueva_fallo <nombre> <agente> <guion de fallo de fake_agente> → número de la issue
+  python3 equipo.py demo tablero nueva "Fallo $1" --agente "$2" \
+    --objetivo "Crea el archivo docs/$1.md con un título. [FALLO:$3]" \
+    --archivo "docs/$1.md" --criterio "existe docs/$1.md" --prueba ci --todo | sed -n 's/^#\([0-9]*\) creada.*/\1/p'
+}
+config_demo() {  # config_demo <clave> <valor JSON> | config_demo restaurar
+  if [ "$1" = restaurar ]; then cp "$S.demo-config.bak" proyectos/demo/config.json; return; fi
+  cp proyectos/demo/config.json "$S.demo-config.bak"
+  CLAVE="$1" VALOR="$2" python3 - <<'PY'
+import json, os
+ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
+c[os.environ["CLAVE"]] = json.loads(os.environ["VALOR"])
+json.dump(c, open(ruta, "w"), indent=2)
+PY
+}
+
+N=$(nueva_fallo fallo-fuera local fuera1)
+python3 equipo.py demo una-vez > "$S.fallo-fuera.log" 2>&1 || true
+export LOGU="$S.fallo-fuera.log"
+comprobar_rev "$N" "junior fuera de alcance una vez: se reintenta solo y termina, sin Bloqueo ni archivos ajenos" <<'PY' || cat "$S.fallo-fuera.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert issue["labels"] == ["agent:local"], issue["labels"]
+assert "fuera-de-alcance.txt" not in en_rama() and f"docs/fallo-fuera.md" in en_rama(), en_rama()
+assert logs_agente("local") == 2 and logs_agente("claude") == 0, (logs_agente("local"), logs_agente("claude"))
+assert pendientes("local") == 1, pendientes("local")
+p = open(f"proyectos/demo/estado/prompts/issue-{n}.md", encoding="utf-8").read()
+assert "Diff fuera de alcance: fuera-de-alcance.txt" in p and "worktree se ha limpiado" in p, p
+PY
+
+N=$(nueva_fallo fallo-junior local junior)
+python3 equipo.py demo una-vez > "$S.fallo-junior.log" 2>&1 || true
+export LOGU="$S.fallo-junior.log"
+comprobar_rev "$N" "junior falla dos veces: pasa a claude (etiqueta, campo Agente, comentario) y claude termina" <<'PY' || cat "$S.fallo-junior.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert issue["labels"] == ["agent:claude"], issue["labels"]
+assert "### Agente\n\nclaude\n" in issue["body"] and "### Agente\n\nlocal" not in issue["body"], issue["body"]
+assert any("pasa a `claude`" in c and "Intento 2 (local" in c for c in issue["comments"]), issue["comments"]
+assert en_rama("docs/fallo-junior.md") == "# Hecho por el equipo\n", "claude no partió de un worktree limpio"
+assert logs_agente("local") == 2 and logs_agente("claude") == 1, (logs_agente("local"), logs_agente("claude"))
+assert pendientes("local") == 2 and pendientes("claude") == 0, (pendientes("local"), pendientes("claude"))
+assert "[claude]" in pr["title"] and "autor: claude" in com[0], (pr["title"], com)
+p = open(f"proyectos/demo/estado/prompts/issue-{n}.md", encoding="utf-8").read()
+assert "ha escalado a ti, el agente senior" in p and "Intento 2 (local" in p, p
+PY
+
+N=$(nueva_fallo fallo-cuota local cuota)
+python3 equipo.py demo una-vez > "$S.fallo-cuota.log" 2>&1 || true
+export LOGU="$S.fallo-cuota.log"
+comprobar_rev "$N" "cuota agotada: Bloqueo como hoy, sin reintento ni escalado" <<'PY' || cat "$S.fallo-cuota.log"
+from revlib import *
+b = campos.get("Bloqueo") or ""
+assert campos["Estado"] == "To Do" and "Cuota agotada" in b and "intento(s)" not in b, campos
+assert issue["labels"] == ["agent:local"] and logs_agente("local") == 1 and logs_agente("claude") == 0, issue["labels"]
+PY
+
+config_demo ollama_url '"http://127.0.0.1:9"'
+N=$(nueva_fallo fallo-ollama local ok)
+python3 equipo.py demo una-vez > "$S.fallo-ollama.log" 2>&1 || true
+export LOGU="$S.fallo-ollama.log"
+config_demo restaurar
+comprobar_rev "$N" "Ollama caído: Bloqueo como hoy, sin reintento ni escalado" <<'PY' || cat "$S.fallo-ollama.log"
+from revlib import *
+b = campos.get("Bloqueo") or ""
+assert campos["Estado"] == "To Do" and "Ollama no disponible" in b and "intento(s)" not in b, campos
+assert issue["labels"] == ["agent:local"] and logs_agente("claude") == 0, issue["labels"]
+PY
+
+N=$(nueva_fallo fallo-todos local todos)
+python3 equipo.py demo una-vez > "$S.fallo-todos.log" 2>&1 || true
+export LOGU="$S.fallo-todos.log"
+comprobar_rev "$N" "también falla el senior: Bloqueo con el historial de los intentos" <<'PY' || cat "$S.fallo-todos.log"
+from revlib import *
+b = campos.get("Bloqueo") or ""
+assert campos["Estado"] == "To Do" and "3 intento(s): local ✗, local ✗, claude ✗" in b, campos
+assert issue["labels"] == ["agent:claude"], issue["labels"]
+assert "Historial de intentos" in issue["comments"][-1] and "Intento 3 (claude" in issue["comments"][-1], issue["comments"]
+assert pendientes("local") == 2 and pendientes("claude") == 0, (pendientes("local"), pendientes("claude"))
+PY
+
+config_demo escalar_fallos false
+N=$(nueva_fallo fallo-sin-escalar local fuera1)
+python3 equipo.py demo una-vez > "$S.fallo-sin.log" 2>&1 || true
+export LOGU="$S.fallo-sin.log"
+config_demo restaurar
+comprobar_rev "$N" "escalar_fallos: false → Bloqueo al primer fallo, como antes" <<'PY' || cat "$S.fallo-sin.log"
+from revlib import *
+b = campos.get("Bloqueo") or ""
+assert campos["Estado"] == "To Do" and "Diff fuera de alcance: fuera-de-alcance.txt" in b and "intento(s)" not in b, campos
+assert issue["labels"] == ["agent:local"] and logs_agente("local") == 1, (issue["labels"], logs_agente("local"))
+assert pendientes("local") == 1, pendientes("local")
+PY
+
 echo "== 4 bis. Vista «Tablero»: columnas por Estado (sin aviso) o por otro campo (aviso con el arreglo)"
 python3 - <<'PY'
 import json, os

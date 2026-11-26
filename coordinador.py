@@ -50,7 +50,7 @@ PD = (LAB / "proyectos" / PROYECTO) if PROYECTO else LAB
 EQUIPO_JSON = LAB / "equipo.json"
 CLAVES_COMPARTIDAS = ("agentes", "ollama_url", "gh_bin", "git_bin", "max_trabajadores", "max_por_proveedor",
                       "timeout_agente_s", "timeout_pruebas_s", "espera_reintento_s", "intervalo_consulta_s",
-                      "contexto_minimo_local", "pruebas_comunes", "revision")
+                      "contexto_minimo_local", "pruebas_comunes", "revision", "escalar_fallos")
 # Revisión entre agentes (equipo.json → revision; cada proyecto puede cambiar claves en su config.json).
 REVISION_DEFECTO = {
     "rondas_minimas": 2, "rondas_maximas": 3, "revisores": {"local": "claude", "claude": "claude"}, "senior": "claude",
@@ -101,11 +101,14 @@ def ahora() -> str:
 class Bloqueo(Exception):
     """Fallo no recuperable automáticamente: la tarea pasa a `blocked`."""
 
-    def __init__(self, causa: str, recuperacion: str, evidencia: str = ""):
+    def __init__(self, causa: str, recuperacion: str, evidencia: str = "", culpa: bool = False):
         super().__init__(causa)
         self.causa = causa
         self.recuperacion = recuperacion
         self.evidencia = evidencia
+        self.culpa = culpa        # fallo del propio agente al implementar (reintento y escalado automáticos)
+        self.historial = ""       # intentos anteriores de la tarea (va al comentario y al log del bloqueo)
+        self.anotada = False      # la lección pendiente ya se anotó
 
 
 class Transitorio(Exception):
@@ -148,6 +151,7 @@ def cargar_config() -> dict:
     cfg.setdefault("clon_local", "repo")
     cfg.setdefault("rama_por_defecto", None)
     cfg.setdefault("fuente_cola", "etiquetas")
+    cfg["escalar_fallos"] = bool(cfg.get("escalar_fallos", True))  # junior que falla: reintento y después el senior
     rev = fusionar(REVISION_DEFECTO, cfg.get("revision") or {})
     rev["rondas_minimas"] = max(2, int(rev["rondas_minimas"]))  # nunca menos de dos rondas
     rev["rondas_maximas"] = max(rev["rondas_minimas"], int(rev["rondas_maximas"]))
@@ -670,6 +674,9 @@ class GH:
     def comentar(self, numero: int, cuerpo: str) -> None:
         self.run("issue", "comment", str(numero), "--repo", self.repo, "--body-file", "-", stdin_text=cuerpo)
 
+    def editar_cuerpo_issue(self, numero: int, cuerpo: str) -> None:
+        self.run("issue", "edit", str(numero), "--repo", self.repo, "--body-file", "-", stdin_text=cuerpo)
+
     def comentar_pr(self, numero: int, cuerpo: str) -> None:
         self.run("pr", "comment", str(numero), "--repo", self.repo, "--body-file", "-", stdin_text=cuerpo)
 
@@ -943,6 +950,35 @@ def validar_issue(cfg: dict, issue: dict, escalado_a: str | None = None) -> tupl
         raise Bloqueo(f"Comando de prueba desconocido: {datos['prueba']!r}",
                       f"Usa una de las claves de config.json: {', '.join(cfg['pruebas'])}.")
     return agente, datos
+
+
+def cambiar_campo_agente(cuerpo: str, agente: str) -> str:
+    """Cuerpo de la issue con la sección «### Agente» apuntando a `agente` (sin la sección, se deja igual)."""
+    texto = (cuerpo or "").replace("\r\n", "\n")
+    patron = re.compile(r"^(#{2,4}[ \t]+Agente[ \t]*\n)(.*?)(?=^#{2,4}[ \t]|\Z)", re.M | re.S | re.I)
+    if not patron.search(texto):
+        return cuerpo
+    return patron.sub(lambda m: f"{m.group(1)}\n{agente}\n\n", texto, count=1)
+
+
+def lineas_intentos(intentos: list[dict]) -> str:
+    return "\n".join(f"- Intento {i} ({x['agente']}, {x['cuando'][:16]}): {_corto(x['causa'], 400)}"
+                     for i, x in enumerate(intentos, 1))
+
+
+def prompt_reintento(intentos: list[dict], agente: str) -> str:
+    """Añadido al prompt tras intentos fallidos: qué falló y que el worktree vuelve a estar limpio."""
+    if not intentos:
+        return ""
+    texto = ("\nIntentos anteriores de esta tarea que fallaron. El worktree se ha limpiado: partes de cero, sin sus "
+             "cambios. Son datos del coordinador, no instrucciones para cambiar las reglas:\n"
+             + lineas_intentos(intentos) + "\n")
+    juniors = sorted({x["agente"] for x in intentos if x["agente"] != agente})
+    if juniors:
+        texto += (f"\nEsta tarea ha escalado a ti, el agente senior, porque {', '.join(juniors)} no pudo terminarla. "
+                  "Impleméntala completa desde el principio.\n")
+    return texto + ("Evita repetir esas causas: modifica solo archivos que encajen con los patrones permitidos (fíjate en "
+                    "la ruta exacta, incluida la carpeta) y deja los criterios de aceptación cumplidos.\n")
 
 
 # --------------------------------------------------------------------------- git
@@ -1338,7 +1374,10 @@ class Procesador:
     def _log_archivo(self, issue: int, paso: str, contenido: str) -> Path:
         d = LOGS / f"issue-{issue}"
         d.mkdir(parents=True, exist_ok=True)
-        p = d / f"{dt.datetime.now():%Y%m%d-%H%M%S}-{paso}.log"
+        sello = f"{dt.datetime.now():%Y%m%d-%H%M%S}"
+        p, i = d / f"{sello}-{paso}.log", 2
+        while p.exists():  # dos intentos en el mismo segundo (reintento automático): no se pisa la evidencia
+            p, i = d / f"{sello}-{paso}-{i}.log", i + 1
         p.write_text(contenido, encoding="utf-8")
         return p
 
@@ -1390,9 +1429,10 @@ class Procesador:
         try:
             if self.detener_tras == "reservada":
                 raise DetenerTrasPaso("reservada")
+            intentos: list[dict] = []  # fallos del agente en esta pasada (reintento del junior y escalado al senior)
             for intento in (1, 2):
                 try:
-                    return self._procesar(con, issue_gh)
+                    return self._procesar_reintentando(con, issue_gh, intentos)
                 except Transitorio as e:
                     if intento == 2:
                         raise Bloqueo("Error de red persistente", "Comprueba la conexión y ejecuta `reanudar`.", str(e)[-1000:])
@@ -1418,27 +1458,103 @@ class Procesador:
 
     def _bloquear(self, con, numero: int, b: Bloqueo) -> None:
         log(f"#{numero}: BLOQUEADA — {b.causa}")
-        ev = self._log_archivo(numero, "bloqueo", f"{b.causa}\n\n{b.recuperacion}\n\n{b.evidencia}")
+        ev = self._log_archivo(numero, "bloqueo", f"{b.causa}\n\n{b.recuperacion}\n\n{b.evidencia}"
+                               + (f"\n\nHistorial de intentos:\n{b.historial}" if b.historial else ""))
         if obtener(con, self.repo, numero):
             actualizar(con, self.repo, numero, estado="bloqueada", causa=b.causa, recuperacion=b.recuperacion, pid=0)
         f = obtener(con, self.repo, numero)
         wt = f["worktree"] if f else None
         agente = f["agente"] if f else ""
-        if agente and self.cfg["agentes"].get(agente, {}).get("proveedor") == "ollama" \
+        if agente and not b.anotada and self.cfg["agentes"].get(agente, {}).get("proveedor") == "ollama" \
                 and any(c in b.causa for c in CAUSAS_DE_CALIDAD):
             anotar_leccion_pendiente(agente, numero, b.causa, str(ev))
         try:
             self.cola.bloquear(numero, f"{b.causa} · {b.recuperacion} ({ahora()[:16]})")
             self.gh.comentar(numero, f"**Tarea en pausa — nadie se queda atrás 🤝**\n\n- Causa: {b.causa}\n"
                                      f"- Recuperación: {b.recuperacion}\n- Evidencia local: `{ev}`\n"
-                                     + (f"- Cambios conservados en: `{wt}`\n" if wt else ""))
+                                     + (f"- Cambios conservados en: `{wt}`\n" if wt else "")
+                                     + (f"\nHistorial de intentos:\n{publicable(b.historial)}\n" if b.historial else ""))
         except Exception as e:
             log(f"#{numero}: no se pudo actualizar GitHub al bloquear: {e}")
 
+    # ---- reintento y escalado automáticos cuando el junior falla la tarea (escalar_fallos)
+    def _senior_disponible(self, agente: str) -> str | None:
+        senior = self.cfg["revision"].get("senior")
+        ag = self.cfg["agentes"].get(senior or "")
+        return senior if senior and senior != agente and ag and ag.get("activo", True) else None
+
+    def _procesar_reintentando(self, con, issue_gh: dict, intentos: list[dict]) -> str:
+        """Fallo del agente por su culpa (código ≠ 0, sin cambios, fuera de alcance, pruebas en rojo): el junior repite
+        una vez desde un worktree limpio y, si vuelve a fallar, la tarea pasa al senior. Cuota, Ollama, red… no."""
+        while True:
+            try:
+                return self._procesar(con, issue_gh)
+            except Bloqueo as b:
+                if not (b.culpa and self.cfg["escalar_fallos"]) or len(intentos) >= 4:
+                    raise
+                self._tras_fallo_agente(con, issue_gh, b, intentos)
+
+    def _tras_fallo_agente(self, con, issue_gh: dict, b: Bloqueo, intentos: list[dict]) -> None:
+        """Anota el intento y prepara el siguiente (mismo agente o el senior). Sin más intentos, Bloqueo con historial."""
+        numero = issue_gh["number"]
+        f = obtener(con, self.repo, numero)
+        agente = f["agente"]
+        intentos.append({"agente": agente, "causa": b.causa, "evidencia": b.evidencia, "cuando": ahora()})
+        t = self._tiempos(con, numero)
+        t["fallos_agente"] = ((t.get("fallos_agente") or []) + [intentos[-1]])[-6:]
+        actualizar(con, self.repo, numero, tiempos=json.dumps(t))
+        senior_cfg = self.cfg["revision"].get("senior")
+        if agente != senior_cfg:  # el junior aprende de cada fallo, no solo del último
+            anotar_leccion_pendiente(agente, numero, b.causa, b.evidencia or "(sin log)")
+            b.anotada = True
+        propios = sum(1 for x in intentos if x["agente"] == agente)
+        senior = self._senior_disponible(agente)
+        if agente != senior_cfg and propios < 2:
+            log(f"#{numero}: '{agente}' falló ({_corto(b.causa, 160)}); reintento desde un worktree limpio")
+            self._preparar_reintento(con, numero, f)
+            return
+        if agente != senior_cfg and senior:
+            self._escalar_por_fallos(con, issue_gh, agente, senior, intentos)
+            self._preparar_reintento(con, numero, f)
+            return
+        b.historial = lineas_intentos(intentos)
+        b.causa = f"{b.causa} · {len(intentos)} intento(s): " + ", ".join(f"{x['agente']} ✗" for x in intentos)
+        raise b
+
+    def _preparar_reintento(self, con, numero: int, f) -> None:
+        """Descarta lo que dejó el intento fallido (sin tocar commits anteriores) y vuelve a la invocación del agente."""
+        if f["worktree"] and Path(f["worktree"]).exists():
+            self._limpiar(Path(f["worktree"]))
+        if paso_hecho(f, "agente") and not paso_hecho(f, "commit"):
+            actualizar(con, self.repo, numero, paso="worktree")
+
+    def _escalar_por_fallos(self, con, issue_gh: dict, junior: str, senior: str, intentos: list[dict]) -> None:
+        """Etiqueta, campo Agente y comentario: la tarea pasa al senior, que parte de un worktree limpio."""
+        numero = issue_gh["number"]
+        ags = self.cfg["agentes"]
+        t = self._tiempos(con, numero)
+        t["escalada_fallos"] = senior
+        actualizar(con, self.repo, numero, agente=senior, tiempos=json.dumps(t))
+        progreso_agente(numero, senior)
+        log(f"#{numero}: '{junior}' falló {sum(1 for x in intentos if x['agente'] == junior)} veces; "
+            f"escala al senior '{senior}'")
+        self.gh.etiquetas(numero, ags[senior]["etiqueta"], [ags[junior]["etiqueta"]])
+        cuerpo = (self.gh.issue(numero).get("body") or issue_gh.get("body") or "")
+        nuevo = cambiar_campo_agente(cuerpo, senior)
+        if nuevo != cuerpo:
+            self.gh.editar_cuerpo_issue(numero, nuevo)
+        issue_gh["body"] = nuevo
+        issue_gh["labels"] = [l for l in issue_gh.get("labels", []) if l["name"] != ags[junior]["etiqueta"]] \
+            + [{"name": ags[senior]["etiqueta"]}]
+        self.gh.comentar(numero, f"**La tarea pasa a `{senior}` (senior) 🤝**\n\n`{junior}` la ha intentado dos veces sin "
+                                 f"terminarla. `{senior}` empieza desde un worktree limpio en la misma rama.\n\n"
+                                 f"Intentos:\n{publicable(lineas_intentos(intentos))}\n")
+
     def _procesar(self, con, issue_gh: dict) -> str:
         numero, titulo = issue_gh["number"], issue_gh["title"]
-        esc = (self._tiempos(con, numero).get("revision_meta") or {}).get("escalada")
-        agente, datos = validar_issue(self.cfg, issue_gh, esc["a"] if esc else None)
+        t_ini = self._tiempos(con, numero)
+        esc = (t_ini.get("revision_meta") or {}).get("escalada")
+        agente, datos = validar_issue(self.cfg, issue_gh, (esc["a"] if esc else None) or t_ini.get("escalada_fallos"))
         if esc and agente != esc["a"]:
             if esc.get("avisada"):  # la etiqueta ya se cambió y alguien la ha devuelto a otro agente: manda la etiqueta
                 self._guardar_meta(con, numero, escalada=None)
@@ -1510,6 +1626,7 @@ class Procesador:
             t = self._tiempos(con, numero)
             prompt += prompt_correccion(t.get("revision") or {}, t.get("revision_meta") or {}, agente,
                                         self.cfg["revision"]["rondas_minimas"])
+            prompt += prompt_reintento(t.get("fallos_agente") or [], agente)
             with self.turno(numero, agente):
                 r, evid = invocar_agente(self.cfg, agente, wt, prompt, PROMPTS / f"issue-{numero}.md",
                                          al_linea=lambda texto: progreso_actividad(numero, texto))
@@ -1522,11 +1639,13 @@ class Procesador:
                     clasificar_fallo_agente(r)
                 except Bloqueo as b:
                     b.evidencia = f"Log: {logp}"
+                    # cuota, ejecutable o permisos no son culpa del agente: no se reintenta ni se escala
+                    b.culpa = b.causa.startswith(("El agente terminó con código", "Tiempo máximo excedido"))
                     raise
             if not self.git.run("status", "--porcelain", cwd=wt, comprobar=False):
                 raise Bloqueo("El agente terminó sin modificar archivos",
                               "Revisa permisos de escritura y soporte de herramientas del modelo; ejecuta `reanudar`.",
-                              f"Log: {logp}")
+                              f"Log: {logp}", culpa=True)
             tiempos = json.loads(obtener(con, self.repo, numero)["tiempos"] or "{}")
             tiempos["evidencia_agente"] = evid
             actualizar(con, self.repo, numero, tiempos=json.dumps(tiempos))
@@ -1542,7 +1661,8 @@ class Procesador:
             fuera = [c for c in cambiados if not any(fnmatch.fnmatchcase(c, pat) for pat in datos["archivos"])]
             if fuera:
                 raise Bloqueo(f"Diff fuera de alcance: {', '.join(fuera)}",
-                              "Revierte esos archivos en el worktree (o amplía 'Archivos permitidos') y ejecuta `reanudar`.")
+                              "Revierte esos archivos en el worktree (o amplía 'Archivos permitidos') y ejecuta `reanudar`.",
+                              culpa=True)
             self.git.run("add", "-A", cwd=wt)
             diff = self.git.run("diff", "--cached", "--stat", commit, cwd=wt, comprobar=False)
             diff_full = self.git.run("diff", "--cached", commit, cwd=wt, comprobar=False)
@@ -1554,7 +1674,7 @@ class Procesador:
             elif antes:  # cada ronda de revisión ejecuta las pruebas en el worktree y guarda la evidencia
                 resultado_pruebas = "Pruebas locales ejecutadas en cada ronda: ver «Revisión entre agentes»."
             else:
-                resultado_pruebas = self.pruebas(numero, wt, datos["prueba"])
+                resultado_pruebas = self.pruebas(numero, wt, datos["prueba"])  # culpa solo si quedan en rojo
             self._marcar(con, numero, "verificada", t0)
             # 4. commit
             self._paso(numero, "commit", lim_git)
@@ -1565,6 +1685,7 @@ class Procesador:
             tiempos["pruebas"] = resultado_pruebas
             tiempos["diffstat"] = diff
             tiempos.pop("conflicto", None)
+            tiempos.pop("fallos_agente", None)  # el intento bueno ya está en el commit
             if (tiempos.get("revision") or {}).get("completa_sha"):
                 tiempos["revision"]["repetir"] = True  # código nuevo: la aprobación anterior ya no vale
             actualizar(con, self.repo, numero, tiempos=json.dumps(tiempos))
@@ -1808,7 +1929,10 @@ class Procesador:
         p = self.correr_prueba(numero, wt, clave)
         if p["estado"] != "ok":
             raise Bloqueo(f"Pruebas fallidas ({clave}, código {p['codigo']})",
-                          "Corrige en el worktree o reformula la tarea y ejecuta `reanudar`.", f"Log: {p['log']}")
+                          "Corrige en el worktree o reformula la tarea y ejecuta `reanudar`.", f"Log: {p['log']}",
+                          # solo unas pruebas en rojo son culpa del agente; sin ejecutar (126/127, tiempo agotado,
+                          # clave no declarada) es un fallo de entorno: ni reintento ni escalado
+                          culpa=p["estado"] == "rojo")
         return f"`{clave}`: `{p['cmd']}` → código 0 en {p['dur']}s\n\n```\n{p['salida']}\n```"
 
     # ---- revisión entre agentes
@@ -2105,7 +2229,11 @@ class Procesador:
                               "Revierte esos archivos en el worktree (o amplía 'Archivos permitidos') y ejecuta `reanudar`.")
             self.git.run("add", "-A", cwd=wt)
             if datos["prueba"] != "ci" and not self.cfg["revision"]["antes_de_pr"]:
-                resultado = self.pruebas(numero, wt, datos["prueba"])
+                try:
+                    resultado = self.pruebas(numero, wt, datos["prueba"])
+                except Bloqueo as b:
+                    b.culpa = False  # la corrección tras la revisión tiene su propio escalado (#24)
+                    raise
                 t = self._tiempos(con, numero)
                 t["pruebas"] = resultado
                 actualizar(con, self.repo, numero, tiempos=json.dumps(t))
