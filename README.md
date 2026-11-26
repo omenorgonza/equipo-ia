@@ -434,6 +434,16 @@ Planning; sin cambios no escribe; con evidencia nueva actualiza solo el bloque a
 Si una fuente falla, sigue con las demás y marca la revisión como PARCIAL. Registro consultable: issue
 «Registro de mantenimiento» (última ejecución y última correcta con enlace) + resumen del run.
 
+**Palabras de normativa propias de cada proyecto** (sin tocar el código): la variable del repo
+`NORMATIVA_PALABRAS` (separadas por comas) se suma a las `palabras` de `mantenimiento.json`, sin duplicados
+(no distingue mayúsculas ni tildes) e ignorando espacios sobrantes. Sin la variable se usan solo las del JSON.
+
+```bash
+gh variable set NORMATIVA_PALABRAS -R <repo> --body "servicios de pago, IRPF, entidades de crédito"   # p. ej. family-finance
+gh variable list -R <repo>                                  # comprobar
+gh variable delete NORMATIVA_PALABRAS -R <repo>             # volver a solo las del JSON
+```
+
 Aviso inmediato = notificación nativa de Dependabot (activa en https://github.com/settings/notifications →
 Dependabot alerts). `aviso-critico.yml` verifica destinatario/configuración y envía un aviso **[SIMULADO]**.
 

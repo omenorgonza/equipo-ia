@@ -196,6 +196,23 @@ def _items_boe(nodo):
             yield from _items_boe(v)
 
 
+def palabras_normativa(base: list[str], extra: str | None = None) -> list[str]:
+    """Palabras de mantenimiento.json + las de NORMATIVA_PALABRAS (separadas por comas), sin duplicados.
+
+    Sin la variable (o vacía) devuelve exactamente `base`. Los duplicados se comparan sin mayúsculas ni tildes.
+    """
+    if extra is None:
+        extra = os.environ.get("NORMATIVA_PALABRAS", "")
+    salida = list(base)
+    vistas = {_normalizar(p.strip()) for p in base}
+    for p in extra.split(","):
+        p = " ".join(p.split())
+        if p and _normalizar(p) not in vistas:
+            vistas.add(_normalizar(p))
+            salida.append(p)
+    return salida
+
+
 def fuente_normativa(_prod_sha) -> list[dict]:
     salida = []
     for f in CONFIG.get("normativa", {}).get("fuentes", []):
@@ -203,7 +220,7 @@ def fuente_normativa(_prod_sha) -> list[dict]:
             continue
         if f["tipo"] != "boe-sumario":
             raise RuntimeError(f"Tipo de fuente no implementado: {f['tipo']} ({f['nombre']})")
-        palabras = [(_normalizar(p), p) for p in f["palabras"]]
+        palabras = [(_normalizar(p), p) for p in palabras_normativa(f.get("palabras", []))]
         for d in range(f.get("dias", 7)):
             fecha = HOY - dt.timedelta(days=d)
             try:

@@ -699,6 +699,42 @@ class P(HTMLParser):
 p = P(); p.feed(open("panel.html", encoding="utf-8").read().split("<script>")[0]); assert not p.pila, p.pila
 PY
 
+echo "== 5d. Palabras de normativa por proyecto (mantenimiento.json + variable NORMATIVA_PALABRAS)"
+MANT_DIR="$ORIG/repo-plantilla/.equipo-ia" python3 - <<'PY' || FALLOS=$((FALLOS + 1))
+import datetime as dt, json, os, sys
+os.environ.pop("NORMATIVA_PALABRAS", None)
+os.environ["EQUIPO_IA_HOY"] = "2026-01-15"
+sys.path.insert(0, os.environ["MANT_DIR"])
+import mantenimiento as M
+fallos = 0
+def check(cond, msg, detalle=""):
+    global fallos
+    print(("OK    " if cond else "FALLO ") + msg + ("" if cond else f" — {detalle}"))
+    fallos += 0 if cond else 1
+fuente = next(f for f in M.CONFIG["normativa"]["fuentes"] if f["tipo"] == "boe-sumario")
+base = fuente["palabras"]
+check(M.palabras_normativa(base) == base, "sin la variable: exactamente las palabras de mantenimiento.json",
+      M.palabras_normativa(base))
+check(M.palabras_normativa(base, "  ,  ") == base, "variable vacía o solo comas: sin cambios")
+os.environ["NORMATIVA_PALABRAS"] = " servicios de pago,IRPF , entidades de crédito, irpf, Protección de Datos ,, "
+mezcla = M.palabras_normativa(base)
+check(mezcla == base + ["servicios de pago", "IRPF", "entidades de crédito"],
+      "con la variable: se añaden sin duplicados (mayúsculas/tildes) e ignorando espacios", mezcla)
+# La búsqueda usa la mezcla: un sumario BOE simulado con un título que solo casa con IRPF.
+sumario = {"data": {"sumario": {"diario": [{"seccion": [{"item": [
+    {"identificador": "BOE-A-2026-0001", "titulo": "Orden por la que se modifica el modelo del IRPF",
+     "url_html": "https://www.boe.es/diario_boe/txt.php?id=BOE-A-2026-0001"},
+    {"identificador": "BOE-A-2026-0002", "titulo": "Resolución sobre pesca de bajura"}]}]}]}}}
+M.http_json = lambda url, timeout=30: sumario
+M.CONFIG["normativa"]["fuentes"] = [dict(fuente, dias=1)]
+h = M.fuente_normativa(None)
+check(len(h) == 1 and h[0]["clave"].endswith("BOE-A-2026-0001") and "coincide con: IRPF" in h[0]["evidencia"],
+      "la búsqueda del BOE usa las palabras de la variable", h)
+del os.environ["NORMATIVA_PALABRAS"]
+check(M.fuente_normativa(None) == [], "sin la variable, ese título no genera hallazgo")
+sys.exit(fallos)
+PY
+
 echo "== 6. Compilación de todo el código"
 python3 -m compileall -q "$ORIG" -x 'proyectos|pruebas-dobles/__pycache__' > /dev/null && ok "compilación" || mal "compilación"
 
