@@ -70,7 +70,14 @@ if "PASO-A-PASO" in prompt:
     paso = float(os.environ.get("FAKE_AGENTE_PASO_S", "1"))
     silencio = float(os.environ.get("FAKE_AGENTE_SILENCIO_S", "6"))
     ruta = _re.search(r"Crea el archivo (docs/\S+?\.md)", prompt).group(1)
+    pensar_n = int(os.environ.get("FAKE_AGENTE_PENSAR_N", "0"))      # eventos thinking_tokens seguidos
+    pensar_s = float(os.environ.get("FAKE_AGENTE_PENSAR_S", "1"))    # segundos entre ellos (claude: ~1 s)
     evento({"type": "system", "subtype": "init", "model": "fake-modelo"}, "opencode: sesión iniciada")
+    # Otro evento de sistema: cuenta como actividad, pero no escribe línea.
+    evento({"type": "system", "subtype": "status", "status": "requesting"}, "opencode: preparando")
+    for i in range(pensar_n):
+        _time.sleep(pensar_s)
+        evento({"type": "system", "subtype": "thinking_tokens", "tokens": 40 * (i + 1)}, "opencode: pensando")
     _time.sleep(paso)
     evento({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Read", "input": {"file_path": "README.md"}}]}}, "Read README.md")

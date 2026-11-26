@@ -168,6 +168,11 @@ avisa en «Puesta a punto pendiente» mientras falte.
     lanza con `--output-format stream-json --verbose` (se fuerza aunque `config.json` diga `json`) y cada evento
     se resume en una línea legible (herramienta usada, archivo leído o editado, texto, resultado); OpenCode se
     registra tal cual. En la espera de la CI, cada consulta cuenta como actividad y queda en el mismo log.
+  - Mientras Claude piensa, stream-json manda un evento `system`/`thinking_tokens` por segundo. No se escribe
+    una línea por evento: la línea viva «pensando… N s» va en `progreso.json` (`ultima_linea` y `pensando_s`),
+    y «Ver progreso» y la tarjeta de Doing la muestran al final del log, sumando segundos en cada refresco. Al
+    llegar otro evento, `issue-N.log` recibe una sola línea «pensó N s». `init` se muestra como «sesión iniciada
+    · modelo X»; los demás eventos de sistema cuentan como actividad (no hay aviso de atasco), sin escribir líneas.
   - Los tokens (`sk-ant-…`, `ghp_…`, `github_pat_…`, `Bearer …`) se filtran antes de escribir el log, igual que en
     el resto de logs del coordinador.
 
