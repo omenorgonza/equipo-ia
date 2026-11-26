@@ -114,7 +114,25 @@ def campos_proyecto():
     return [{"id": "F_Status", "name": "Status", "dataType": "SINGLE_SELECT", "options": []},
             {"id": "F_Estado", "name": "Estado", "dataType": "SINGLE_SELECT", "options": [{"id": "O_" + o, "name": o} for o in ESTADO_OPC]},
             {"id": "F_Prioridad", "name": "Prioridad", "dataType": "SINGLE_SELECT", "options": [{"id": "O_" + o, "name": o} for o in PRIO_OPC]},
-            {"id": "F_Bloqueo", "name": "Bloqueo", "dataType": "TEXT"}]
+            {"id": "F_Bloqueo", "name": "Bloqueo", "dataType": "TEXT"},
+            {"id": "F_Siguiente", "name": "Siguiente", "dataType": "TEXT"}]
+
+
+CAMPOS_TEXTO = ("Bloqueo", "Siguiente")
+
+
+def archivos_pr(p):
+    """Archivos cambiados por la PR (como `files` de gh): p["archivos"] lo fuerza; si no, git diff base...head."""
+    if "archivos" in p:
+        return list(p["archivos"])
+    r = subprocess.run(["git", "-C", remoto(p["repo"]), "diff", "--name-only", f"refs/heads/{p['base']}...refs/heads/{p['head']}"],
+                       capture_output=True, text=True)
+    return [l for l in r.stdout.splitlines() if l.strip()] if r.returncode == 0 else []
+
+
+def anotar_escritura(s, campo):
+    """Cuenta las escrituras por campo: el ensayo comprueba que no se repiten si el valor no cambia."""
+    s.setdefault("escrituras", {})[campo] = s.setdefault("escrituras", {}).get(campo, 0) + 1
 
 
 CABECERAS: dict = {}
@@ -162,7 +180,7 @@ def graphql(s, a):
     if "items(first" in q:
         nodes = []
         for iid, it in p["items"].items():
-            fvs = [{("text" if n == "Bloqueo" else "name"): val, "field": {"name": n}}
+            fvs = [{("text" if n in CAMPOS_TEXTO else "name"): val, "field": {"name": n}}
                    for n, val in it["fields"].items() if val not in (None, "")]
             iss = s["issues"].get(it.get("issue", ""))
             contenido = {} if not iss else {
@@ -179,9 +197,11 @@ def graphql(s, a):
             print("HTTP 502: fallo simulado al escribir Estado", file=sys.stderr)
             sys.exit(1)
         p["items"][v["i"]]["fields"][campo] = valor
+        anotar_escritura(s, campo)
         return {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": v["i"]}}}
     if "clearProjectV2ItemFieldValue" in q:
         p["items"][v["i"]]["fields"][v["f"].split("_", 1)[1]] = None
+        anotar_escritura(s, v["f"].split("_", 1)[1])
         return {"clearProjectV2ItemFieldValue": {"projectV2Item": {"id": v["i"]}}}
     if "addProjectV2ItemById" in q:
         k = s["issue_ids"][v["c"]]
@@ -378,10 +398,20 @@ elif a[:2] == ["issue", "comment"]:
     s["issues"][clave(repo_de(a), int(a[2]))]["comments"].append(body(a))
 elif a[:2] == ["pr", "list"]:
     repo, h, autor, st = repo_de(a), opt(a, "--head"), opt(a, "--author"), (opt(a, "--state") or "open").upper()
-    out = [{"number": p["number"], "url": p["url"], "state": p["state"], "title": p["title"],
-            "createdAt": "2026-11-01T00:00:00Z", "statusCheckRollup": checks(s, p)} for p in s["prs"]
-           if p["repo"] == repo and (not h or p["head"] == h) and (not autor or p.get("author") == autor)
-           and (st == "ALL" or p["state"] == st)]
+    campos = (opt(a, "--json") or "").split(",")
+    out = []
+    for p in s["prs"]:
+        if p["repo"] != repo or (h and p["head"] != h) or (autor and p.get("author") != autor) \
+                or (st != "ALL" and p["state"] != st):
+            continue
+        x = {"number": p["number"], "url": p["url"], "state": p["state"], "title": p["title"],
+             "createdAt": "2026-11-01T00:00:00Z", "statusCheckRollup": checks(s, p), "headRefName": p["head"],
+             "body": p.get("body", ""), "isDraft": p.get("draft", False)}
+        if "mergeable" in campos:
+            x["mergeable"] = "CONFLICTING" if en_conflicto(p) else "MERGEABLE"
+        if "files" in campos:
+            x["files"] = [{"path": f} for f in archivos_pr(p)]
+        out.append(x)
 elif a[:2] == ["pr", "view"]:
     ref = a[2]
     p = next(p for p in s["prs"] if p["url"] == ref or (str(p["number"]) == ref and p["repo"] == repo_de(a)))
