@@ -44,6 +44,7 @@ jobs:
           GH_TOKEN: ${{ secrets.TABLERO_TOKEN }}
           TABLERO_OWNER: ${{ vars.TABLERO_OWNER }}
           TABLERO_NUMERO: ${{ vars.TABLERO_NUMERO }}
+          NORMATIVA_PALABRAS: ${{ vars.NORMATIVA_PALABRAS }}
         run: python .equipo-ia/mantenimiento.py --simulacion "${{ inputs.simulacion || 'ninguna' }}"
       - name: Reconciliar PRO (detecta movimientos manuales y reversiones)
         if: always()
