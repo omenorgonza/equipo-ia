@@ -78,8 +78,54 @@ git pull --ff-only
 python3 equipo.py panel              # reinicia el panel (cierra antes el anterior con Ctrl+C)
 ```
 
+### ¿Qué hago ahora?
+
+No hace falta deducirlo mirando el tablero: el equipo calcula **el siguiente paso** y lo enseña en dos sitios.
+
+- **En el panel**, el bloque «¿Qué hago ahora?» (arriba del todo) muestra por proyecto la primera acción en
+  negrita («Siguiente paso: integrar la PR #33 (#24 …)»), las siguientes («Después: 2. … · 3. …») y las tarjetas
+  que conviene esperar con su motivo. Si la acción es reanudar o reintentar, el botón está ahí mismo; si es
+  integrar una PR, el enlace la abre. En la lista de tareas de cada proyecto, cada tarjeta lleva debajo su texto.
+- **En el tablero de GitHub** (también desde el móvil), el campo de texto **Siguiente** de cada tarjeta dice lo
+  mismo. Añádelo como columna en la vista «Planning» (Table → `+` → Siguiente) y, si quieres, muéstralo en las
+  tarjetas de la vista «Tablero» (Board → View → Fields → Siguiente).
+
+El orden de las acciones es siempre el mismo:
+1. **Integrar** las PR de **Testing / Review** con la CI en verde (o sin CI). En una cadena, la dependencia primero.
+2. **Arreglar** las PR con conflictos o con la CI en rojo: `reanudar N --desde agente` («Reintentar con el agente»).
+3. **Reanudar** las tarjetas con Bloqueo: `reanudar N`.
+4. **Pasar a To Do** las de **Planning** que pueden empezar ya. Una de Planning con un Bloqueo antiguo se
+   recomienda como `reanudar N` (retira el Bloqueo y la deja en To Do; moverla sin más no basta, la cola la salta).
+
+Qué significa cada texto del campo Siguiente:
+
+| Texto | Qué hacer |
+|---|---|
+| `▶ 1 · integrar la PR #33 (#24 …)` | La acción número 1 (la de arriba del banner). Hazla en ese orden. |
+| `⏸ espera: comparte coordinador.py con la PR #33 (#24)` | No la pases a To Do hasta integrar esa PR: chocarían. |
+| `⏸ espera a #21: comparte panel.py` | Otra tarjeta de Planning recomendada antes toca lo mismo: primero esa. |
+| `⏸ espera dependencia #24 (en review, sin integrar)` | La dependencia aún no está en `main`: intégrala antes. |
+| `⏳ espera la CI de la PR #33` · `⏳ en cola: la cogerá claude` · `⚙ en curso (local)` | Nada: el equipo sigue solo. |
+| `✎ completar la issue: falta agente, comando de prueba` | Rellena esos campos de la issue antes de autorizarla. |
+
+Las esperas por **archivos compartidos** comparan los archivos permitidos de la tarjeta con los de las PR abiertas
+(los archivos cambiados de verdad) y con los de las tareas en To Do, Doing o Review. README, `docs/` y los
+ensayos no cuentan: casi todas las tareas los tocan y se reconcilian sin problema.
+
+**Quién lo escribe.** El coordinador lo recalcula en cada ciclo (al elegir tareas y al terminarlas) y el panel,
+cuando el equipo está parado, al refrescar el tablero. Solo se escriben las tarjetas cuyo texto cambia (sin
+escrituras repetidas) y el campo se **vacía** cuando la tarjeta ya no necesita nada (Done, PRO, Backlog). Sin
+poder leer las PR abiertas no se escribe nada, para no publicar una recomendación falsa. A mano:
+```bash
+python3 equipo.py equipo-ia tablero siguiente        # muestra la lista y actualiza el campo (lo crea si falta)
+python3 equipo.py equipo-ia tablero siguiente --ver  # solo mostrar
+```
+Los tableros nuevos traen el campo (`tablero.py crear`); en uno antiguo, `tablero siguiente` lo crea y el panel
+avisa en «Puesta a punto pendiente» mientras falte.
+
 ### Qué hace el panel
 
+- **¿Qué hago ahora?**: el siguiente paso de cada proyecto (ver la sección anterior).
 - **Requiere tu atención**: PR por revisar, tarjetas bloqueadas, avisos de
   seguridad críticos/altos y CI en rojo en la rama principal, de todos los proyectos a la vez.
   Toda tarjeta bloqueada tiene **Reanudar** (`coordinador.py reanudar N`: sigue desde el paso pendiente,
@@ -130,7 +176,7 @@ Solo escucha en 127.0.0.1 y las acciones exigen un token que cambia en cada arra
 ### Tablero estándar en cada proyecto
 
 Los tableros nuevos se **copian del tablero de ensayo** (vistas «Tablero» y «Planning», campos Estado,
-Prioridad y Bloqueo, y workflows desactivados). Para otra plantilla: `plantilla_tablero` en `equipo.json`.
+Prioridad, Bloqueo y Siguiente, y workflows desactivados). Para otra plantilla: `plantilla_tablero` en `equipo.json`.
 Un tablero creado sin plantilla y aún vacío se sustituye con `python3 equipo.py <proyecto> tablero rehacer`
 (el antiguo no se borra; elimínalo tú en Settings → Delete project).
 

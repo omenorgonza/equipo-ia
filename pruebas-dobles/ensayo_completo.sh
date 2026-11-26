@@ -363,6 +363,99 @@ python3 equipo.py demo tablero verificar > "$S.verif-mal.log" 2>&1 || true
 grep -q "agrupa las columnas por Status, no por Estado: Vista Tablero → Column by → Estado → Save" "$S.verif-mal.log" \
   && ok "agrupada por Status: verificar avisa con la instrucción" || { cat "$S.verif-mal.log"; mal "verificar sin aviso de agrupación"; }
 
+echo "== 4 sexies. Siguiente paso recomendado (¿Qué hago ahora?) y campo «Siguiente» del tablero"
+PYTHONPATH="$ORIG/repo-plantilla/.equipo-ia" python3 - <<'PY' && ok "siguiente paso: integrar, esperas por solape y dependencia, reanudar, solape inofensivo" || mal "siguiente paso (reglas)"
+import tablero_lib as T
+R = "oscar/x"
+def card(n, estado, archivos=("coordinador.py",), agente="claude", deps=(), bloqueo=""):
+    cuerpo = (f"### Agente\n\n{agente}\n\n### Archivos permitidos\n\n" + "\n".join(archivos) +
+              "\n\n### Comando de prueba\n\nci\n\n### Dependencias\n\n" + (" ".join(f"#{d}" for d in deps) or "ninguna"))
+    return {"item_id": f"I{n}", "numero": n, "repo": R, "titulo": f"Tarea {n}", "cuerpo": cuerpo,
+            "creada": f"2026-01-{n:02d}", "abierta": True, "etiquetas": [f"agent:{agente}"], "estado": estado,
+            "prioridad": "P2 normal", "bloqueo": bloqueo, "siguiente": "", "url": f"https://x/{n}"}
+def pr(num, ci="verde", archivos=("coordinador.py",), conflicto=False):
+    return {"pr": num, "url": f"https://x/pull/{num}", "ci": ci, "borrador": False, "conflicto": conflicto,
+            "archivos": list(archivos)}
+items = [card(1, T.REVIEW), card(2, T.PLANNING), card(3, T.PLANNING),
+         card(4, T.PLANNING, archivos=("README.md", "docs/guia.md", "pruebas-dobles/ensayo_completo.sh")),
+         card(5, T.PLANNING, archivos=("panel.py",), deps=(1,)),
+         card(6, T.PLANNING, archivos=("equipo.py",), bloqueo="Bloqueo de un intento anterior"),
+         card(7, T.DONE), card(8, T.PLANNING, archivos=("equipo.py",))]
+items[6]["siguiente"] = "texto viejo"
+rec = T.recomendar(items, {(R, 1): pr(10, archivos=("coordinador.py", "README.md", "docs/guia.md",
+                                                    "pruebas-dobles/ensayo_completo.sh"))})
+sig = {n: rec["tarjetas"][(R, n)] for n in range(1, 9)}
+a = rec["acciones"]
+assert a[0]["tipo"] == "integrar" and a[0]["numero"] == 1 and "PR #10" in a[0]["texto"], a
+assert rec["resumen"].startswith("Siguiente paso: integrar la PR #10"), rec["resumen"]
+assert sig[1].startswith("▶ 1 · integrar la PR #10"), sig[1]
+for n in (2, 3):
+    assert sig[n].startswith("⏸ espera") and "coordinador.py" in sig[n] and "PR #10" in sig[n], sig
+    assert any(e["numero"] == n and "coordinador.py" in e["texto"] for e in rec["esperas"]), rec["esperas"]
+assert sig[5].startswith("⏸ espera dependencia #1") and "en review, sin integrar" in sig[5], sig[5]
+assert any(x["numero"] == 6 and x["tipo"] == "reanudar" and x["comando"] == "reanudar 6" for x in a), a
+assert "reanudar 6" in sig[6], sig[6]
+assert any(x["numero"] == 4 and x["tipo"] == "todo" for x in a), (a, sig[4])
+assert sig[8].startswith("⏸ espera a #6") and "equipo.py" in sig[8], sig[8]
+assert sig[7] == "", sig[7]
+# CI en rojo o conflictos: no se integra; la acción es reintentar con el agente.
+rec = T.recomendar(items[:1], {(R, 1): pr(10, ci="rojo")})
+assert rec["acciones"][0]["comando"] == "reanudar 1 --desde agente", rec["acciones"]
+rec = T.recomendar(items[:1], {(R, 1): pr(10, conflicto=True)})
+assert rec["acciones"][0]["tipo"] == "arreglar" and "conflictos" in rec["acciones"][0]["texto"], rec["acciones"]
+rec = T.recomendar(items[:1], {(R, 1): pr(10, ci="pendiente")})
+assert not rec["acciones"] and rec["tarjetas"][(R, 1)].startswith("⏳"), rec
+# Cadena en Review: la dependencia se integra antes aunque sea más nueva.
+c = [card(11, T.REVIEW, archivos=("a.py",), deps=(12,)), card(12, T.REVIEW, archivos=("b.py",))]
+rec = T.recomendar(c, {(R, 11): pr(21), (R, 12): pr(22)})
+assert [x["numero"] for x in rec["acciones"]] == [12, 11], rec["acciones"]
+assert T.resumen_ci([{"status": "COMPLETED", "conclusion": "SUCCESS"}]) == "verde"
+assert T.resumen_ci([{"status": "IN_PROGRESS", "conclusion": ""}]) == "pendiente"
+assert T.resumen_ci([{"status": "COMPLETED", "conclusion": "FAILURE"}]) == "rojo" and T.resumen_ci([]) == "sin_ci"
+PY
+escrituras() {
+  python3 -c "import json,os; print(json.load(open(os.environ['FAKE_GH_STATE'])).get('escrituras', {}).get('Siguiente', 0))"
+}
+python3 equipo.py demo tablero siguiente > "$S.sig1.log" 2>&1 || true
+E1=$(escrituras)
+python3 - <<'PY' && ok "campo Siguiente rellenado en el tablero simulado (integrar primero)" || { cat "$S.sig1.log"; mal "campo Siguiente no rellenado"; }
+import json, os
+s = json.load(open(os.environ["FAKE_GH_STATE"]))
+p = [p for p in s["projects"].values() if p["title"] == "Equipo IA · demo"][0]
+review = [it["fields"] for it in p["items"].values() if it["fields"].get("Estado") == "Testing / Review"]
+assert review and all(f.get("Siguiente") for f in review), review
+assert any((f.get("Siguiente") or "").startswith("▶ 1 · integrar la PR #") for f in review), review
+bloqueadas = [it["fields"] for it in p["items"].values() if it["fields"].get("Bloqueo")]
+assert all("reanudar" in (f.get("Siguiente") or "") for f in bloqueadas), bloqueadas
+PY
+grep -q "^Siguiente paso: integrar la PR #" "$S.sig1.log" && grep -q "tarjeta(s) actualizada(s)" "$S.sig1.log" \
+  && ok "tablero siguiente: la primera acción es integrar la PR" || { cat "$S.sig1.log"; mal "tablero siguiente: resumen"; }
+python3 equipo.py demo tablero siguiente > "$S.sig2.log" 2>&1 || true
+[ "$(escrituras)" = "$E1" ] && grep -q "0 tarjeta(s) actualizada(s)" "$S.sig2.log" \
+  && ok "sin cambios no se vuelve a escribir el campo Siguiente" || { cat "$S.sig2.log"; mal "escrituras repetidas del campo Siguiente"; }
+python3 - <<'PY' || mal "no pude simular la integración de una tarjeta en Review"
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+p = [p for p in s["projects"].values() if p["title"] == "Equipo IA · demo"][0]
+it = next(it for it in p["items"].values() if it["fields"].get("Estado") == "Testing / Review")
+it["fields"]["Estado"] = "Done"               # simula la integración: la tarjeta sale de Review
+s["issues"][it["issue"]]["state"] = "CLOSED"
+n = s["issues"][it["issue"]]["number"]
+for pr in s["prs"]:
+    if pr["repo"] == "oscar/demo-app" and pr["head"].endswith(f"/issue-{n}"):
+        pr["state"], pr["merged"] = "MERGED", True
+s["sig_integrada"] = it["issue"]
+json.dump(s, open(st, "w"))
+PY
+python3 equipo.py demo tablero siguiente > "$S.sig3.log" 2>&1 || true
+python3 - <<'PY' && ok "campo Siguiente vaciado al integrarse la tarjeta" || { cat "$S.sig3.log"; mal "campo Siguiente no vaciado"; }
+import json, os
+s = json.load(open(os.environ["FAKE_GH_STATE"]))
+p = [p for p in s["projects"].values() if p["title"] == "Equipo IA · demo"][0]
+it = next(it for it in p["items"].values() if it.get("issue") == s["sig_integrada"])
+assert not it["fields"].get("Siguiente"), it["fields"]
+PY
+
 echo "== 5. Panel local"
 PUERTO=8791
 python3 equipo.py panel --puerto $PUERTO --no-abrir > "$S.panel.log" 2>&1 &
@@ -377,6 +470,15 @@ curl -sf "http://127.0.0.1:$PUERTO/api/estado" | python3 -c "
 import json,sys; d=json.load(sys.stdin); n=[p['nombre'] for p in d['proyectos']]
 assert {'ensayo','demo'} <= set(n), n
 assert all(p['error'] is None for p in d['proyectos']), [p['error'] for p in d['proyectos']]" && ok "estado de todos los proyectos" || mal "api/estado"
+curl -sf "http://127.0.0.1:$PUERTO/api/estado" | python3 -c "
+import json,sys; d={p['nombre']: p for p in json.load(sys.stdin)['proyectos']}
+s=d['demo']['siguiente']
+assert s['resumen'].startswith('Siguiente paso: integrar la PR #') and s['acciones'][0]['tipo'] == 'integrar', s
+ts=[t for g in d['demo']['tarjetas'].values() for t in g]
+assert any(t['siguiente'].startswith('▶ 1 · integrar') for t in ts), ts
+assert all(t['siguiente'] for t in d['demo']['tarjetas'].get('Testing / Review', [])), ts" \
+  && grep -q 'id="siguiente"' panel.html && grep -q "¿Qué hago ahora?" panel.html && grep -q "t.siguiente" panel.html \
+  && ok "panel: banner «¿Qué hago ahora?» y siguiente paso por tarjeta" || mal "panel: banner del siguiente paso"
 curl -sf "http://127.0.0.1:$PUERTO/api/estado" | python3 -c "
 import json,sys; d={p['nombre']: p for p in json.load(sys.stdin)['proyectos']}
 aviso = lambda p: [a for a in d[p]['atencion'] if a['tipo'] == 'instalacion' and 'Column by' in a['texto']]

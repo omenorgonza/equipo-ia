@@ -801,6 +801,32 @@ def crear_cola(cfg: dict, gh: GH):
     return ColaTablero(cfg, gh) if cfg["fuente_cola"] == "tablero" else ColaEtiquetas(cfg, gh)
 
 
+_ultimo_siguiente: dict[str, str] = {}
+
+
+def actualizar_siguiente(cfg: dict) -> dict | None:
+    """Recalcula el siguiente paso y rellena/vacía el campo Siguiente del tablero (solo lo que cambia).
+
+    Nunca interrumpe la cola: un fallo (sin campo, sin red) solo se anota en el log. El resumen se registra
+    cuando cambia, para que `vigilar` no repita la misma línea en cada ciclo."""
+    if cfg.get("fuente_cola") != "tablero" or not (cfg.get("tablero") or {}).get("numero"):
+        return None
+    tb = cfg["tablero"]
+    try:
+        t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), cfg["gh_bin"])
+        rec = t.siguiente(cfg.get("repos") or [cfg["repo"]], escribir=True)
+    except Exception as e:  # noqa: BLE001
+        log(f"Siguiente paso: no pude actualizarlo ({str(e)[:200]})")
+        return None
+    if rec.get("error_prs"):
+        log(f"Siguiente paso: sin las PR abiertas no escribo el campo ({rec['error_prs'][:200]})")
+    texto = rec["resumen"] + (f" · {rec['escritas']} tarjeta(s) actualizada(s)" if rec.get("escritas") else "")
+    if rec.get("escritas") or _ultimo_siguiente.get(cfg["repo"]) != rec["resumen"]:
+        log(texto)
+    _ultimo_siguiente[cfg["repo"]] = rec["resumen"]
+    return rec
+
+
 # --------------------------------------------------------------------------- lecciones del equipo
 
 LECCIONES = LAB / "lecciones"
@@ -2260,11 +2286,14 @@ def procesar_cola(cfg: dict, detener_tras: str | None = None) -> dict:
         seleccion.append((issue, agente))
     con.close()
 
+    # Siguiente paso en el tablero: ya con las tarjetas elegidas en Doing y otra vez al terminar el trabajo.
+    actualizar_siguiente(cfg)
     if seleccion:
         with ThreadPoolExecutor(max_workers=len(seleccion)) as ex:
             futuros = {ex.submit(proc.procesar, i): i["number"] for i, _ in seleccion}
             for fut, n in futuros.items():
                 resumen.setdefault(fut.result(), []).append(n)
+        actualizar_siguiente(cfg)
     return resumen
 
 

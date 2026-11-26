@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Tablero del equipo (GitHub Project privado).
 
-  crear        Crea o reutiliza el proyecto, sus campos (Estado, Prioridad, Bloqueo) y lo enlaza al repo.
+  crear        Crea o reutiliza el proyecto, sus campos (Estado, Prioridad, Bloqueo, Siguiente) y lo enlaza al repo.
   verificar    Comprueba campos, vistas, privacidad y cada permiso con tu identidad local.
   migrar       Ensayo de migración desde las etiquetas de estado (solo lectura por defecto; --aplicar escribe).
-  ver          Lista las tarjetas por Estado con prioridad y bloqueo.
+  ver          Lista las tarjetas por Estado con prioridad, bloqueo y siguiente paso.
   nueva        Crea una tarea (issue + tarjeta) en Backlog o en To Do.
+  siguiente    ¿Qué hago ahora? Calcula el siguiente paso y rellena el campo Siguiente (--ver: sin escribir).
 """
 from __future__ import annotations
 
@@ -100,7 +101,8 @@ def cmd_crear(a) -> None:
     existentes = t.campos
     for nombre, tipo, opciones in [(T.CAMPO_ESTADO, "SINGLE_SELECT", OPCIONES_ESTADO),
                                    (T.CAMPO_PRIORIDAD, "SINGLE_SELECT", OPCIONES_PRIORIDAD),
-                                   (T.CAMPO_BLOQUEO, "TEXT", None)]:
+                                   (T.CAMPO_BLOQUEO, "TEXT", None),
+                                   (T.CAMPO_SIGUIENTE, "TEXT", None)]:
         if nombre in existentes:
             print(f"Campo {nombre}: ya existe")
             continue
@@ -156,7 +158,10 @@ def cmd_verificar(_a) -> None:
         print(f"  {nombre}: {tiene or 'NO EXISTE'}")
         if faltan:
             problemas.append(f"Faltan opciones en {nombre}: {faltan}")
-    print(f"  {T.CAMPO_BLOQUEO}: {'texto' if T.CAMPO_BLOQUEO in campos else 'NO EXISTE'}")
+    for nombre in T.CAMPOS_TEXTO:
+        print(f"  {nombre}: {'texto' if nombre in campos else 'NO EXISTE'}")
+    if T.CAMPO_SIGUIENTE not in campos:
+        problemas.append(f"Falta el campo {T.CAMPO_SIGUIENTE}: python3 tablero.py siguiente lo crea y lo rellena")
     vistas = {v["name"]: v["layout"] for v in info["views"]["nodes"]}
     print(f"  Vistas: {vistas}")
     for v in info["views"]["nodes"]:
@@ -242,7 +247,33 @@ def cmd_ver(_a) -> None:
         for i in grupo:
             agente = ",".join(e for e in i["etiquetas"] if e.startswith("agent:")) or "-"
             print(f"  #{i['numero']:<4} {(i['prioridad'] or '--')[:2]}  {agente:13} {i['titulo'][:60]}"
-                  + (f"\n         ⛔ {i['bloqueo']}" if i["bloqueo"] else ""))
+                  + (f"\n         ⛔ {i['bloqueo']}" if i["bloqueo"] else "")
+                  + (f"\n         → {i['siguiente']}" if i.get("siguiente") else ""))
+
+
+def cmd_siguiente(a) -> None:
+    """¿Qué hago ahora?: acciones en orden, esperas con su motivo y el campo Siguiente de cada tarjeta."""
+    cfg = C.cargar_config()
+    t = cfg_tablero(cfg)
+    escribir = not a.ver
+    if escribir and T.CAMPO_SIGUIENTE not in t.campos:
+        gh(cfg, "project", "field-create", str(t.numero), "--owner", t.owner, "--name", T.CAMPO_SIGUIENTE,
+           "--data-type", "TEXT")
+        print(f"Campo {T.CAMPO_SIGUIENTE}: creado")
+        t._campos = None
+    rec = t.siguiente(cfg.get("repos") or [cfg["repo"]], escribir=escribir)
+    print(rec["resumen"])
+    for i, ac in enumerate(rec["acciones"], 1):
+        print(f"  {i}. {ac['texto']}" + (f"   → python3 equipo.py {C.PROYECTO} {ac['comando']}"
+                                         if ac.get("comando") and C.PROYECTO else ""))
+    if rec["esperas"]:
+        print("En espera:")
+        for e in rec["esperas"]:
+            print(f"  #{e['numero']}: {e['texto']}")
+    if rec.get("error_prs"):
+        print(f"Aviso: no pude leer las PR abiertas ({rec['error_prs'][:200]}); el campo no se ha tocado.")
+    elif escribir:
+        print(f"Campo {T.CAMPO_SIGUIENTE}: {rec['escritas']} tarjeta(s) actualizada(s)")
 
 
 def cuerpo_tarea(objetivo, agente, base, archivos, criterios, prueba, deps) -> str:
@@ -303,6 +334,9 @@ def main() -> None:
     x.add_argument("--aplicar", action="store_true")
     x.set_defaults(f=cmd_migrar)
     sp.add_parser("ver").set_defaults(f=cmd_ver)
+    x = sp.add_parser("siguiente", help="¿Qué hago ahora? Siguiente paso y campo Siguiente del tablero")
+    x.add_argument("--ver", action="store_true", help="Solo mostrar; no escribir en el tablero")
+    x.set_defaults(f=cmd_siguiente)
     x = sp.add_parser("nueva", description="Ejemplo: python3 tablero.py nueva \"Añadir media de puntos\" "
                       "--agente local --archivo src/puntos.py --archivo tests/test_puntos.py "
                       "--criterio \"media([2,4]) == 3\" --criterio \"lista vacía → ValueError\" --prueba unit --prioridad P2 --todo")

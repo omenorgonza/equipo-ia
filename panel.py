@@ -219,6 +219,14 @@ def log_progreso(nombre: str, numero: int) -> dict:
     return {"numero": numero, "log": texto, "progreso": prog, "en_curso": prog is not None}
 
 
+def siguiente_json(rec: dict) -> dict:
+    """Recomendación de T.recomendar → JSON para el banner «¿Qué hago ahora?» (sin las claves tupla)."""
+    if not rec:
+        return {"resumen": "", "acciones": [], "esperas": [], "error": None}
+    return {"resumen": rec.get("resumen", ""), "acciones": rec.get("acciones", []), "esperas": rec.get("esperas", []),
+            "error": rec.get("error") or rec.get("error_prs"), "escritas": rec.get("escritas")}
+
+
 def estado_proyecto(nombre: str, forzar=False) -> dict:
     cfg = E.cfg_proyecto(nombre)
     repos = cfg.get("repos") or [cfg.get("repo")]
@@ -226,7 +234,8 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
     salida = {"nombre": nombre, "descripcion": cfg.get("descripcion", ""), "color": E.color_proyecto(nombre),
               "repos": [], "tablero": tb.get("url"),
               "activo": E.coordinador_activo(nombre), "columnas": {e: 0 for e in T.ESTADOS}, "atencion": [],
-              "tarjetas": {}, "error": None, "pruebas": pruebas_proyecto(cfg), "progreso": []}
+              "tarjetas": {}, "error": None, "pruebas": pruebas_proyecto(cfg), "progreso": [],
+              "siguiente": siguiente_json({})}
     try:
         prog = progreso_tareas(nombre, cfg)
     except Exception:  # noqa: BLE001 — el panel nunca se cae por el progreso
@@ -235,19 +244,30 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
     vistos: set[int] = set()
 
     def items():
+        """Tarjetas y siguiente paso de la misma lectura. Con el equipo parado, el panel mantiene al día el campo
+        Siguiente del tablero (solo escribe lo que cambia); con el equipo en marcha lo hace el coordinador."""
         t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
-        return t.items()
+        its = t.items()
+        try:
+            escribir = not E.coordinador_activo(nombre) and T.CAMPO_SIGUIENTE in t.campos
+            rec = t.siguiente(repos, escribir=escribir, items=its)
+        except Exception as e:  # noqa: BLE001 — sin recomendación, el resto del panel sigue
+            rec = {"error": str(e)[:300]}
+        return {"items": its, "siguiente": rec}
 
     def vistas():
         t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
         info = t.info()
-        return {"nombres": [v["name"] for v in info["views"]["nodes"]], "agrupacion": T.aviso_agrupacion(info)}
+        return {"nombres": [v["name"] for v in info["views"]["nodes"]], "agrupacion": T.aviso_agrupacion(info),
+                "sin_siguiente": T.CAMPO_SIGUIENTE not in {f["name"] for f in info["fields"]["nodes"] if f}}
 
     if tb.get("numero"):
-        its = cacheado(f"items:{nombre}", 60, items, forzar)
-        if isinstance(its, dict) and its.get("error"):
-            salida["error"] = its["error"]
-            its = []
+        lectura = cacheado(f"items:{nombre}", 60, items, forzar)
+        if isinstance(lectura, dict) and lectura.get("error"):
+            salida["error"] = lectura["error"]
+            lectura = {"items": [], "siguiente": {}}
+        its, rec = lectura["items"], lectura.get("siguiente") or {}
+        salida["siguiente"] = siguiente_json(rec)
         prs = prs_registro(nombre)
         grupos: dict[str, list] = {}
         for it in its:
@@ -258,6 +278,7 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
                 salida["columnas"][e] += 1
             tarjeta = {"numero": it["numero"], "titulo": it["titulo"], "url": it["url"], "prioridad": it["prioridad"],
                        "bloqueo": it["bloqueo"], "pr": prs.get(it["numero"]), "repo": it["repo"],
+                       "siguiente": (rec.get("tarjetas") or {}).get((it["repo"].lower(), it["numero"]), ""),
                        "agente": next((x.split(":")[1] for x in it["etiquetas"] if x.startswith("agent:")), None)}
             pg = prog.get(it["numero"]) if (not repo_cola or (it["repo"] or "").lower() == repo_cola) else None
             if pg is not None:
@@ -286,6 +307,10 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
             g.sort(key=lambda x: (T.rango_prioridad(x["prioridad"]), x["numero"]))
         salida["tarjetas"] = grupos
         vs = cacheado(f"vistas:{nombre}", 600, vistas, forzar)
+        if isinstance(vs, dict) and vs.get("sin_siguiente"):
+            salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "url": tb.get("url"),
+                                       "texto": f"Falta el campo «{T.CAMPO_SIGUIENTE}» del tablero: "
+                                                f"python3 equipo.py {nombre} tablero siguiente lo crea y lo rellena"})
         if isinstance(vs, dict) and "nombres" in vs:
             faltan = [v for v in (T.VISTA_TABLERO, "Planning") if v not in vs["nombres"]]
             if faltan:

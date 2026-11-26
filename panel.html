@@ -124,6 +124,11 @@
   .prog.atasco { background: #fdf3dc; border-color: var(--warn); }
   .prog.atasco .aviso { color: #7a4f0a; font-weight: 600; }
   .at.atasco { background: #fdf3dc; }
+  /* «¿Qué hago ahora?»: el siguiente paso de cada proyecto (T.recomendar) y el campo Siguiente por tarjeta. */
+  .at.sig .t b { font-weight: 600; }
+  .at.sig .luego { display: block; color: var(--muted); font-size: 13px; }
+  .tarj { flex-wrap: wrap; }
+  .tarj .sig-t { width: 100%; color: var(--muted); font-size: 12.5px; padding-left: 2px; }
   @media (prefers-color-scheme: dark) {
     .prog.atasco, .at.atasco { background: #3a2e14; } .prog.atasco .aviso { color: #f3cf7a; }
   }
@@ -211,6 +216,9 @@
     <pre id="trabajo-log"></pre>
   </section>
 
+  <h2>¿Qué hago ahora?</h2>
+  <div class="atencion" id="siguiente"><div class="vacio">Cargando…</div></div>
+
   <h2>Requiere tu atención</h2>
   <div class="atencion" id="atencion"><div class="vacio">Cargando…</div></div>
   <details class="puesta" id="puesta" hidden><summary id="puesta-t">Puesta a punto pendiente</summary>
@@ -273,13 +281,28 @@ function pintar() {
       ${a.reanudar ?`<button class="mini" onclick="reanudar('${a.proyecto}', ${a.numero})" title="Continúa desde el paso pendiente sin volver a llamar al agente">Reanudar</button>` : ""}
     </div>`).join("") : `<div class="vacio">Nada urgente. El equipo puede seguir solo. 🎉</div>`;
 
+  const sig = ps.filter(p => p.siguiente && (p.siguiente.resumen || p.siguiente.error));
+  sig.sort((a, b) => (b.siguiente.acciones || []).length - (a.siguiente.acciones || []).length || a.nombre.localeCompare(b.nombre));
+  document.getElementById("siguiente").innerHTML = sig.length ? sig.map(p => {
+    const s = p.siguiente, acciones = s.acciones || [], primera = acciones[0], esperas = s.esperas || [];
+    const resumen = primera && primera.url
+      ? `<a href="${esc(primera.url)}" target="_blank" rel="noopener">${esc(s.resumen)}</a>` : esc(s.resumen);
+    return `<div class="at sig ${primera ? "alta" : ""}"><span class="p c-${esc(p.color)}">${esc(p.nombre)}</span>
+      <span class="t"><b>${resumen}</b>
+        ${acciones.length > 1 ? `<span class="luego">Después: ${acciones.slice(1, 5).map((a, i) => `${i + 2}. ${esc(a.texto)}`).join(" · ")}</span>` : ""}
+        ${esperas.length ? `<span class="luego">${esperas.map(e => `⏸ #${e.numero} ${esc(e.texto)}`).join(" · ")}</span>` : ""}
+        ${s.error ? `<span class="luego">Aviso: ${esc(s.error)}</span>` : ""}
+      </span>
+      ${primera ? botonSiguiente(p.nombre, primera) : ""}
+    </div>`; }).join("") : `<div class="vacio">Sin tablero todavía: no hay siguiente paso que calcular.</div>`;
+
   const abiertos = new Set([...document.querySelectorAll("details[data-p]")].filter(d => d.open).map(d => d.dataset.p));
   ps.sort((a, b) => b.atencion.filter(x => x.nivel === "alta").length - a.atencion.filter(x => x.nivel === "alta").length
                     || a.nombre.localeCompare(b.nombre));
   document.getElementById("proyectos").innerHTML = ps.map(p => {
     const altas = p.atencion.filter(a => a.nivel === "alta").length;
     const rd = (p.repos[0] || {}).readme || {};
-    const activas = ["Testing / Review", "Doing", "To Do"].flatMap(e => (p.tarjetas[e] || []).map(t => ({...t, e})));
+    const activas = ["Testing / Review", "Doing", "To Do", "Planning"].flatMap(e => (p.tarjetas[e] || []).map(t => ({...t, e})));
     return `<article class="card c-${esc(p.color)} ${altas ? "foco" : ""}">
       <div class="top"><h3>${esc(p.nombre)}</h3>
         <span class="pill ${p.activo ? "on" : "off"}">${p.activo ? "Equipo trabajando" : "Equipo parado"}</span></div>
@@ -301,10 +324,11 @@ function pintar() {
           <button class="mini" onclick="verProgreso('${p.nombre}', ${pg.numero})">Ver progreso</button>
           ${pg.ultima_linea ? `<span class="ult" title="${esc(pg.ultima_linea)}">${esc(pg.ultima_linea)}</span>` : ""}
         </div>`).join("")}</div>` : ""}
-      ${activas.length ? `<details data-p="${esc(p.nombre)}" ${abiertos.has(p.nombre) ? "open" : ""}><summary>${activas.length} tarea(s) en curso o pendientes</summary>
+      ${activas.length ? `<details data-p="${esc(p.nombre)}" ${abiertos.has(p.nombre) ? "open" : ""}><summary>${activas.length} tarea(s) en curso, pendientes o en Planning</summary>
         ${activas.map(t => `<div class="tarj"><span>${esc(CORTO[t.e] || t.e)}</span>
           <a href="${esc(t.pr || t.url)}" target="_blank" rel="noopener">#${t.numero} ${esc(t.titulo)}</a>
-          <span class="pr">${esc((t.prioridad || "").slice(0,2))} ${esc(t.agente || "")}</span></div>`).join("")}</details>` : ""}
+          <span class="pr">${esc((t.prioridad || "").slice(0,2))} ${esc(t.agente || "")}</span>
+          ${t.siguiente ? `<span class="sig-t">${esc(t.siguiente)}</span>` : ""}</div>`).join("")}</details>` : ""}
       <div class="acciones">
         ${p.tablero ? `<a class="btn mini" href="${esc(p.tablero)}" target="_blank" rel="noopener">Abrir tablero ↗</a>` : ""}
         ${p.activo ? `<button class="mini" onclick="accion('${p.nombre}','parar')">Parar equipo</button>`
@@ -317,6 +341,15 @@ function pintar() {
       </div></article>`; }).join("") || `<div class="vacio">Aún no hay proyectos. Usa «Nuevo proyecto» o «Añadir proyecto existente».</div>`;
 }
 
+// Botón de la primera acción del banner: reanudar / reintentar se hacen desde aquí; integrar o pasar a To Do, en GitHub.
+function botonSiguiente(p, a) {
+  const c = a.comando || "";
+  if (c.startsWith("reanudar") && c.includes("--desde agente"))
+    return `<button class="mini" onclick="reintentar('${p}', ${a.numero})">Reintentar con el agente</button>`;
+  if (c.startsWith("reanudar"))
+    return `<button class="mini" onclick="reanudar('${p}', ${a.numero})" title="python3 equipo.py ${esc(p)} ${esc(c)}">Reanudar</button>`;
+  return a.url ? `<a class="btn mini" href="${esc(a.url)}" target="_blank" rel="noopener">${a.tipo === "integrar" ? "Abrir PR ↗" : "Abrir ↗"}</a>` : "";
+}
 async function accion(p, a) { const r = await post(`/api/proyecto/${p}/${a}`); toast(r.mensaje || r.error); setTimeout(() => cargar(), 1200); }
 async function cambiarColor(p, c) { const r = await post(`/api/proyecto/${p}/color`, {color: c});
   if (!r.ok) return toast(r.error || "No se pudo guardar el color");
