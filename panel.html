@@ -129,6 +129,8 @@
   .at.sig .luego { display: block; color: var(--muted); font-size: 13px; }
   .tarj { flex-wrap: wrap; }
   .tarj .sig-t { width: 100%; color: var(--muted); font-size: 12.5px; padding-left: 2px; }
+  /* Dependencias pendientes (sección «Dependencias» + «Blocked by» de GitHub) de las tareas en To Do. */
+  .tarj .espera { width: 100%; color: var(--muted); font-size: 12.5px; padding-left: 2px; }
   @media (prefers-color-scheme: dark) {
     .prog.atasco, .at.atasco { background: #3a2e14; } .prog.atasco .aviso { color: #f3cf7a; }
   }
@@ -328,6 +330,8 @@ function pintar() {
         ${activas.map(t => `<div class="tarj"><span>${esc(CORTO[t.e] || t.e)}</span>
           <a href="${esc(t.pr || t.url)}" target="_blank" rel="noopener">#${t.numero} ${esc(t.titulo)}</a>
           <span class="pr">${esc((t.prioridad || "").slice(0,2))} ${esc(t.agente || "")}</span>
+          ${(t.espera || []).length ? `<span class="espera">⏳ espera a ${t.espera.map(d =>
+            `<a href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.estado || "fuera del tablero")}">${esc(d.texto)}</a>`).join(", ")}</span>` : ""}
           ${t.siguiente ? `<span class="sig-t">${esc(t.siguiente)}</span>` : ""}</div>`).join("")}</details>` : ""}
       <div class="acciones">
         ${p.tablero ? `<a class="btn mini" href="${esc(p.tablero)}" target="_blank" rel="noopener">Abrir tablero ↗</a>` : ""}

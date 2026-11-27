@@ -232,6 +232,40 @@ def siguiente_json(rec: dict) -> dict:
             "error": rec.get("error") or rec.get("error_prs"), "escritas": rec.get("escritas")}
 
 
+LISTAS_PARA_DEPENDER = (T.REVIEW, T.DONE, T.PRO)   # misma regla que el coordinador: en review o cerrada
+VIVAS = (T.TODO, T.DOING, T.REVIEW)                 # una dependencia en otro sitio deja la tarea esperando siempre
+
+
+def dependencias_pendientes(it: dict, indice: dict, forzar=False) -> list[dict]:
+    """Dependencias aún no listas de una tarjeta: sección «Dependencias» + relaciones «Blocked by» de GitHub."""
+    repo, n = it["repo"], it["numero"]
+    deps: dict[tuple[str, int], dict] = {}
+    for d in T.datos_cuerpo(it.get("cuerpo") or "")["dependencias"]:
+        deps[(repo.lower(), d)] = {"repo": repo, "numero": d}
+    rel = cacheado(f"bloqueo:{repo}#{n}", 120, lambda: C.relaciones_bloqueo(
+        gh_json("api", f"repos/{repo}/issues/{n}/dependencies/blocked_by?per_page=100") or [], repo), forzar)
+    for r in rel if isinstance(rel, list) else []:
+        deps[(r["repo"].lower(), r["numero"])] = r
+    pendientes = []
+    for clave, d in deps.items():
+        otro = indice.get(clave)
+        if otro:
+            estado, abierta, url = otro["estado"], otro["abierta"], otro["url"]
+        elif "abierta" in d:
+            estado, abierta, url = None, d["abierta"], d["url"]
+        else:
+            st = cacheado(f"estado-issue:{d['repo']}#{d['numero']}", 300, lambda d=d: gh_json(
+                "issue", "view", str(d["numero"]), "--repo", d["repo"], "--json", "state,url") or {}, forzar)
+            st = st if isinstance(st, dict) else {}
+            estado, abierta = None, st.get("state") != "CLOSED"
+            url = st.get("url") or f"https://github.com/{d['repo']}/issues/{d['numero']}"
+        if abierta and estado not in LISTAS_PARA_DEPENDER:
+            pendientes.append({"numero": d["numero"], "repo": d["repo"], "url": url, "estado": estado,
+                               "texto": f"#{d['numero']}" if d["repo"].lower() == repo.lower()
+                               else f"{d['repo']}#{d['numero']}"})
+    return pendientes
+
+
 def estado_proyecto(nombre: str, forzar=False) -> dict:
     cfg = E.cfg_proyecto(nombre)
     repos = cfg.get("repos") or [cfg.get("repo")]
@@ -274,6 +308,7 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
         its, rec = lectura["items"], lectura.get("siguiente") or {}
         salida["siguiente"] = siguiente_json(rec)
         prs = prs_registro(nombre)
+        indice = {((x["repo"] or "").lower(), x["numero"]): x for x in its}
         grupos: dict[str, list] = {}
         for it in its:
             if not it["abierta"] and it["estado"] not in (T.DONE, T.PRO):
@@ -294,6 +329,16 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
                     tarjeta["progreso"] = pg
                     salida["progreso"].append(pg)
             grupos.setdefault(e, []).append(tarjeta)
+            if e == T.TODO and it["abierta"]:
+                tarjeta["espera"] = dependencias_pendientes(it, indice, forzar)
+                for d in tarjeta["espera"]:
+                    if d["estado"] in VIVAS:
+                        continue
+                    donde = f"en {d['estado']}" if d["estado"] else "fuera del tablero"
+                    salida["atencion"].append({
+                        "nivel": "alta", "tipo": "dependencia", "numero": it["numero"], "url": d["url"],
+                        "texto": f"#{it['numero']} espera a {d['texto']}, que está {donde}: se quedaría esperando "
+                                 f"para siempre (mueve {d['texto']} a To Do o saca #{it['numero']} de To Do)"})
             if it["bloqueo"]:
                 salida["atencion"].append({"nivel": "alta", "tipo": "bloqueo", "numero": it["numero"],
                                            "texto": f"#{it['numero']} bloqueada: {it['bloqueo'][:160]}",

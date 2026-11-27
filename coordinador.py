@@ -687,6 +687,19 @@ def paso_hecho(fila, paso: str) -> bool:
 
 # --------------------------------------------------------------------------- GitHub
 
+def relaciones_bloqueo(lista, repo: str) -> list[dict]:
+    """Respuesta de `issues/<n>/dependencies/blocked_by` → [{repo, numero, abierta, url}] (repo «owner/nombre»)."""
+    salida = []
+    for i in lista if isinstance(lista, list) else []:
+        if not isinstance(i, dict) or not isinstance(i.get("number"), int):
+            continue
+        m = re.search(r"repos/([^/]+/[^/]+)$", i.get("repository_url") or "")
+        salida.append({"repo": m.group(1) if m else repo, "numero": i["number"],
+                       "abierta": str(i.get("state", "open")).lower() == "open",
+                       "url": i.get("html_url") or f"https://github.com/{m.group(1) if m else repo}/issues/{i['number']}"})
+    return salida
+
+
 class GH:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -710,6 +723,11 @@ class GH:
     def issue(self, numero: int) -> dict:
         return json.loads(self.run("issue", "view", str(numero), "--repo", self.repo,
                                    "--json", "number,title,body,labels,author,state"))
+
+    def bloqueada_por(self, numero: int) -> list[dict]:
+        """Relaciones «Blocked by» nativas de GitHub (dependencias de issues) por REST."""
+        out = self.run("api", f"repos/{self.repo}/issues/{numero}/dependencies/blocked_by?per_page=100")
+        return relaciones_bloqueo(json.loads(out or "[]"), self.repo)
 
     def etiquetas(self, numero: int, poner: str | None, quitar: list[str]) -> None:
         args = ["issue", "edit", str(numero), "--repo", self.repo]
@@ -1471,8 +1489,27 @@ class Procesador:
             log(f"#{issue}: reconciliado {f['paso']} -> {paso}")
             actualizar(con, self.repo, issue, paso=paso)
 
-    def dependencias_listas(self, deps: list[int]) -> list[int]:
-        return [d for d in deps if not self.cola.dependencia_lista(d)]
+    def dependencias_de(self, numero: int, de_seccion: list[int]) -> list:
+        """Unión de la sección «Dependencias» y de las relaciones «Blocked by» abiertas de GitHub. Las de este repo
+        van como número; las de otro repo, como «owner/repo#N» (abiertas: siempre pendientes). Si la API de
+        dependencias falla (gh antiguo, GHES sin la función…), solo cuenta la sección."""
+        deps: list = list(dict.fromkeys(de_seccion))
+        try:
+            relaciones = self.gh.bloqueada_por(numero)
+        except Exception as e:  # noqa: BLE001 — sin relaciones, la sección sigue mandando
+            log(f"#{numero}: no pude leer las relaciones «blocked by» ({_corto(str(e), 160)}); uso solo la sección")
+            return deps
+        for r in relaciones:
+            if not r["abierta"]:
+                continue
+            d = r["numero"] if r["repo"].lower() == self.repo.lower() else f"{r['repo']}#{r['numero']}"
+            if d not in deps:
+                deps.append(d)
+        return deps
+
+    def dependencias_listas(self, deps: list) -> list:
+        """Dependencias pendientes: las de este repo que no están en review ni cerradas y las abiertas de otro repo."""
+        return [d for d in deps if isinstance(d, str) or not self.cola.dependencia_lista(d)]
 
     def procesar(self, issue_gh: dict) -> str:
         con = db()
@@ -1615,10 +1652,10 @@ class Procesador:
         self.reconciliar(con, numero)
         f = obtener(con, self.repo, numero)
 
-        if datos["dependencias"] and not paso_hecho(f, "agente"):
-            pend = self.dependencias_listas(datos["dependencias"])
+        if not paso_hecho(f, "agente"):
+            pend = self.dependencias_listas(self.dependencias_de(numero, datos["dependencias"]))
             if pend:
-                raise Bloqueo(f"Dependencias pendientes: {', '.join('#'+str(p) for p in pend)}",
+                raise Bloqueo(f"Dependencias pendientes: {', '.join(p if isinstance(p, str) else '#'+str(p) for p in pend)}",
                               "Cuando estén en review o cerradas, vuelve a poner ready o ejecuta `reanudar`.")
 
         rama = f["rama"] or f"agente/{agente}/issue-{numero}"
@@ -2436,7 +2473,7 @@ def procesar_cola(cfg: dict, detener_tras: str | None = None) -> dict:
             resumen.setdefault("agente_no_disponible", []).append(n)
             continue
         if not huerfana:
-            deps = parsear_issue(issue.get("body", ""))["dependencias"]
+            deps = proc.dependencias_de(n, parsear_issue(issue.get("body", ""))["dependencias"])
             if deps and proc.dependencias_listas(deps):
                 resumen.setdefault("esperando_dependencias", []).append(n)
                 continue

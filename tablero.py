@@ -286,6 +286,20 @@ def cuerpo_tarea(objetivo, agente, base, archivos, criterios, prueba, deps) -> s
             (" ".join(f"#{d}" for d in deps) or "ninguna") + "\n")
 
 
+def crear_bloqueo(cfg: dict, numero: int, dep: int) -> str | None:
+    """Relación nativa «Blocked by» (#numero bloqueada por #dep). Devuelve el error o None; nunca aborta."""
+    repo = cfg["repo"]
+    r = C.ejecutar(cfg["gh_bin"] + ["api", f"repos/{repo}/issues/{dep}", "--jq", ".id"], cwd=LAB, timeout=60)
+    issue_id = (r.stdout or "").strip()
+    if r.returncode != 0 or not issue_id.isdigit():
+        return f"no encuentro el id de #{dep}: {(r.stderr or r.stdout or '').strip()[:160]}"
+    r = C.ejecutar(cfg["gh_bin"] + ["api", "-X", "POST", f"repos/{repo}/issues/{numero}/dependencies/blocked_by",
+                                    "-F", f"issue_id={issue_id}"], cwd=LAB, timeout=60)
+    if r.returncode != 0:
+        return (r.stderr or r.stdout or "").strip()[:200] or f"código {r.returncode}"
+    return None
+
+
 def cmd_nueva(a) -> None:
     """Captura desde la terminal. Completa → puede ir a To Do; incompleta → Backlog con los huecos marcados."""
     cfg = C.cargar_config()
@@ -311,6 +325,10 @@ def cmd_nueva(a) -> None:
     t.mover(item, destino)
     t.poner_opcion(item, T.CAMPO_PRIORIDAD, T.prioridad_por_codigo(a.prioridad))
     print(f"#{numero} creada en {destino} con {a.prioridad}: {url}")
+    for d in dict.fromkeys(a.dep or []):
+        error = crear_bloqueo(cfg, numero, d)
+        print(f"  Blocked by #{d}: relación creada en GitHub" if not error else
+              f"  Aviso: no pude crear la relación «blocked by» #{d} ({error}); la sección Dependencias sí la recoge")
     if not completa and not a.cuerpo:
         print("  Incompleta para ejecutarse: completa Agente, Archivos permitidos, Criterios y Comando de prueba "
               "en la issue antes de moverla a To Do.")
@@ -346,7 +364,7 @@ def main() -> None:
     x.add_argument("--archivo", action="append", help="Patrón de archivo permitido (repetible)")
     x.add_argument("--criterio", action="append", help="Criterio de aceptación (repetible)")
     x.add_argument("--prueba", help="Clave de config.json → pruebas (p. ej. unit) o «ci» para usar la CI del proyecto")
-    x.add_argument("--dep", action="append", type=int, help="Issue de la que depende (repetible)")
+    x.add_argument("--dep", action="append", type=int, help="Issue de la que depende (repetible): sección Dependencias + relación «Blocked by» de GitHub")
     x.add_argument("--prioridad", default="P2", choices=["P0", "P1", "P2", "P3"])
     x.add_argument("--cuerpo", help="Archivo .md con el cuerpo completo en formato de la plantilla")
     x.add_argument("--todo", action="store_true", help="Autorizar ya (To Do) en vez de Backlog")

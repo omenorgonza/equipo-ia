@@ -66,6 +66,18 @@ def issue_json(s, i):
                                                if p["repo"] == i["repo"] and i["number"] in p.get("closes", []) and p.get("merged")]}
 
 
+def id_rest(i):
+    """Id numérico de la API REST (distinto del número y del node id de GraphQL)."""
+    return 100000 + int(i["id"].split("_")[1])
+
+
+def issue_rest(i):
+    """Issue como la devuelve la API REST (la usan las dependencias «blocked by»)."""
+    return {"id": id_rest(i), "node_id": i["id"], "number": i["number"], "title": i["title"],
+            "state": i["state"].lower(), "html_url": f"https://github.com/{i['repo']}/issues/{i['number']}",
+            "repository_url": f"https://api.github.com/repos/{i['repo']}"}
+
+
 def remoto(repo):
     return os.path.join(os.environ.get("FAKE_GH_REMOTOS", "/tmp"), repo.split("/")[1] + ".git")
 
@@ -290,6 +302,25 @@ def api(s, a):
                 "title": p["title"], "body": p.get("body", ""),
                 "base": {"ref": p["base"]}, "head": {"ref": p["head"], "sha": head_sha(p["repo"], p["head"])},
                 "mergeable": not choca, "mergeable_state": "dirty" if choca else "clean"}
+    m = re.fullmatch(r"issues/(\d+)(/dependencies/blocked_by)?", sub.split("?")[0])
+    if m:
+        i = s["issues"].get(clave(repo, int(m.group(1))))
+        if not i:
+            print("HTTP 404: Not Found", file=sys.stderr); sys.exit(1)
+        if not m.group(2):
+            return issue_rest(i)
+        if os.environ.get("FAKE_GH_FALLA_DEPENDENCIAS"):
+            print("HTTP 403: Resource not accessible by integration (issue dependencies)", file=sys.stderr); sys.exit(1)
+        if metodo == "POST":  # crea la relación: #N bloqueada por la issue con ese id numérico (REST)
+            campos = dict(x.split("=", 1) for x in opt(a, "-f", True) + opt(a, "-F", True))
+            dep = next((x for x in s["issues"].values() if str(id_rest(x)) == campos.get("issue_id")), None)
+            if not dep:
+                print("HTTP 422: Validation Failed (issue_id)", file=sys.stderr); sys.exit(1)
+            k = clave(dep["repo"], dep["number"])
+            if k not in i.setdefault("blocked_by", []):
+                i["blocked_by"].append(k)
+            return issue_rest(dep)
+        return [issue_rest(s["issues"][k]) for k in i.get("blocked_by", []) if k in s["issues"]]
     if "/permission" in sub:
         return {"permission": "admin"}
     raise SystemExit("api no soportada: " + ruta)
