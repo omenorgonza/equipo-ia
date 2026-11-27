@@ -169,7 +169,8 @@ def archivos_cambiados(worktree: str | None) -> int | None:
     if not worktree or not Path(worktree).is_dir():
         return None
     try:
-        out = E.git("status", "--porcelain", cwd=Path(worktree), comprobar=False)
+        # --no-optional-locks: solo mirar, sin coger index.lock (si no, choca con el git add del coordinador).
+        out = E.git("--no-optional-locks", "status", "--porcelain", cwd=Path(worktree), comprobar=False)
     except Exception:  # noqa: BLE001
         return None
     return len([l for l in out.splitlines() if l.strip()])
