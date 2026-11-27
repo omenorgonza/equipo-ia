@@ -73,13 +73,24 @@ Cuenta como culpa del agente: terminar con código ≠ 0 o por tiempo máximo, n
 cuota agotada, Ollama caído, ejecutable no encontrado, permisos, red, pruebas que no llegan a ejecutarse (código
 126/127, tiempo de pruebas agotado o clave no declarada) o fallos de la revisión entre agentes (que tiene
 su propio escalado). Cada fallo del junior anota una lección pendiente en `estado/lecciones-pendientes.md`. Si el
-senior no está activo, tras el segundo fallo del junior queda en Bloqueo.
+senior no está activo, cuando el junior gasta sus intentos la tarea queda en Bloqueo.
 
-Para desactivarlo (un fallo → Bloqueo, como antes), en `equipo.json` o en el `config.json` del proyecto:
+### Activar y ajustar el escalado
 
-```json
-"escalar_fallos": false
+**Desde el panel.** Cada proyecto tiene la casilla «Escalar al senior» y el selector «tras N fallo(s) del junior».
+Pulsa «Guardar escalado»: el panel cambia solo esas dos claves del `config.json` del proyecto y el equipo en marcha
+las aplica en el ciclo siguiente, sin reiniciar.
+
+**A mano, en `proyectos/<nombre>/config.json`** (o en `equipo.json` para todos los proyectos):
+
+```jsonc
+"escalar_fallos": true,      // false: el primer fallo bloquea la tarea, sin reintento ni escalado
+"fallos_para_escalar": 2     // intentos del junior antes de pasar al senior (1–5; con 1 escala al primer fallo)
 ```
+
+Los intentos gastados se guardan en el registro: tras un Bloqueo y `reanudar`, el junior solo tiene los que le
+quedaban (si ya los gastó, la tarea pasa directamente al senior). Si después de escalar devuelves la etiqueta al
+junior, manda la etiqueta: el coordinador pone el campo Agente al día y el junior empieza con todos sus intentos.
 
 ## Lecciones y skills
 
