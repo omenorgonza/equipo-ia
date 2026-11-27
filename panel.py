@@ -201,6 +201,7 @@ def progreso_tareas(nombre: str, cfg: dict) -> dict[int, dict]:
             "inicio_tarea": e.get("inicio_tarea"), "inicio_paso": e.get("inicio_paso"),
             "ultima_actividad": e.get("ultima_actividad"), "inactivo_s": int(inactivo),
             "ultima_linea": C.redactar(str(e.get("ultima_linea") or ""))[:300],
+            "pensando_s": e["pensando_s"] if isinstance(e.get("pensando_s"), int) else None,
             "archivos_cambiados": archivos_cambiados(e.get("worktree")),
             "estimado_min": round(sum(previos) / len(previos) / 60, 1) if previos else None,
             "atasco": inactivo > umbral, "umbral_atasco_s": int(umbral)}
@@ -216,7 +217,11 @@ def log_progreso(nombre: str, numero: int) -> dict:
     else:
         texto = "(sin salida del agente todavía)"
     prog = progreso_tareas(nombre, E.cfg_proyecto(nombre)).get(numero)
-    return {"numero": numero, "log": texto, "progreso": prog, "en_curso": prog is not None}
+    viva = prog["ultima_linea"] if prog and prog.get("pensando_s") else None
+    if viva:  # «pensando… N s» aún no está en issue-N.log (solo se escribe al terminar): va al final, en vivo
+        hora = str(prog.get("ultima_actividad") or "")[11:19]
+        texto = (texto + "\n" if p.exists() else "") + (f"[{hora}] " if hora else "") + viva
+    return {"numero": numero, "log": texto, "progreso": prog, "en_curso": prog is not None, "linea_viva": viva}
 
 
 def siguiente_json(rec: dict) -> dict:

@@ -278,8 +278,11 @@ def ejecutar_en_directo(cmd: list[str], cwd: Path | None = None, timeout: int | 
         matar_arbol(p)
         p.wait()
         vencido = True
+    # Las últimas líneas (stdout y stderr) deben llegar al log antes de dar el paso por acabado: se espera a los
+    # dos hilos de lectura (con un plazo común, por si un nieto retiene las tuberías abiertas).
+    fin = time.time() + 30
     for h in hilos:
-        h.join(timeout=10)
+        h.join(timeout=max(0.1, fin - time.time()))
     out, err = "".join(partes["out"]), "".join(partes["err"])
     if vencido:
         r = subprocess.CompletedProcess(cmd, -9, out, err + "\n[coordinador] TIEMPO MÁXIMO EXCEDIDO")
@@ -356,6 +359,8 @@ _progreso: dict[str, dict] = {}
 _progreso_lock = threading.RLock()
 _progreso_volcado = [0.0]
 _progreso_pendiente: list[threading.Timer] = []
+_pensando: dict[str, dict] = {}   # «pensando… N s» en curso por tarea: prefijo, inicio y segundos
+PENSANDO = "\x00pensando"          # marca que devuelve resumir_evento_claude para un evento de pensar
 MAX_LOG_AGENTE = 2_000_000
 
 
@@ -402,6 +407,7 @@ def _escribir_log_agente(numero: int, texto: str) -> None:
 
 def progreso_iniciar(numero: int, agente: str, worktree: Path) -> None:
     with _progreso_lock:
+        _pensando.pop(str(numero), None)
         p = log_agente_path(numero)
         if p.exists() and p.stat().st_size > MAX_LOG_AGENTE:  # conserva solo la parte final
             lineas = p.read_text(encoding="utf-8", errors="replace").splitlines()[-2000:]
@@ -421,6 +427,7 @@ def progreso_paso(numero: int, paso: str, limite_s: int | float | None) -> None:
         e = _progreso.get(str(numero))
         if e is None:
             return
+        _fin_pensar(numero)
         t = time.time()
         texto = f"── paso {paso}" + (f" (límite {int(limite_s)} s)" if limite_s else "")
         _escribir_log_agente(numero, texto)
@@ -438,9 +445,49 @@ def progreso_agente(numero: int, agente: str) -> None:
             _volcar_progreso()
 
 
-def progreso_actividad(numero: int, texto: str | None, al_log: bool = True) -> None:
-    """Última actividad: una línea del agente o una consulta de la CI. `texto` ya puede venir filtrado."""
+def _fin_pensar(numero: int) -> None:
+    """Cierra el «pensando… N s» en curso: deja una sola línea «pensó N s» en issue-N.log."""
     with _progreso_lock:
+        p = _pensando.pop(str(numero), None)
+        if p is None:
+            return
+        texto = f"{p['prefijo']}pensó {p['s']} s"
+        _escribir_log_agente(numero, texto)
+        e = _progreso.get(str(numero))
+        if e is not None:
+            e.pop("pensando_s", None)
+            e["ultima_linea"] = redactar(texto)[:300]
+
+
+def _pensar(numero: int, prefijo: str) -> None:
+    """Un evento `thinking_tokens`: actualiza la línea viva (progreso.json), sin escribir en issue-N.log."""
+    with _progreso_lock:
+        t = time.time()
+        p = _pensando.get(str(numero))
+        if p is not None and p["prefijo"] != prefijo:
+            _fin_pensar(numero)
+            p = None
+        if p is None:
+            p = _pensando[str(numero)] = {"prefijo": prefijo, "desde": t, "s": 1}
+        else:
+            p["s"] = max(p["s"], int(round(t - p["desde"])) + 1)
+        e = _progreso.get(str(numero))
+        if e is None:
+            return
+        e["ultima_actividad"], e["ultima_actividad_ts"] = ahora(), t
+        e["ultima_linea"] = redactar(f"{prefijo}pensando… {p['s']} s")[:300]
+        e["pensando_s"] = p["s"]
+        _volcar_progreso(forzar=False)
+
+
+def progreso_actividad(numero: int, texto: str | None, al_log: bool = True) -> None:
+    """Última actividad: una línea del agente o una consulta de la CI. `texto` ya puede venir filtrado.
+    Si termina en `PENSANDO` (evento de pensar de claude), suma segundos a la línea viva «pensando… N s»."""
+    with _progreso_lock:
+        if texto and texto.endswith(PENSANDO):
+            _pensar(numero, texto[:-len(PENSANDO)])
+            return
+        _fin_pensar(numero)
         if texto and al_log:
             _escribir_log_agente(numero, texto)
         e = _progreso.get(str(numero))
@@ -454,6 +501,7 @@ def progreso_actividad(numero: int, texto: str | None, al_log: bool = True) -> N
 
 def progreso_quitar(numero: int) -> None:
     with _progreso_lock:
+        _fin_pensar(numero)
         if _progreso.pop(str(numero), None) is not None or PROGRESO_PATH.exists():
             _volcar_progreso()
 
@@ -472,8 +520,11 @@ def resumir_evento_claude(linea: str) -> str | None:
     if not isinstance(ev, dict):
         return linea
     tipo = ev.get("type")
-    if tipo == "system":
-        return f"sesión {ev.get('subtype') or ''} · modelo {ev.get('model') or '?'}".strip()
+    if tipo == "system":  # init se muestra; pensar suma a la línea viva; el resto solo cuenta como actividad
+        sub = ev.get("subtype")
+        if sub == "init":
+            return f"sesión iniciada · modelo {ev.get('model') or '?'}"
+        return PENSANDO if sub == "thinking_tokens" else None
     if tipo == "result":
         dur = ev.get("duration_ms")
         return (f"resultado: {'ERROR' if ev.get('is_error') else 'ok'} ({ev.get('subtype') or '-'})"

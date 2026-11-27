@@ -716,11 +716,13 @@ NP=$(python3 equipo.py demo tablero nueva "Tarea en directo" --agente claude \
   --objetivo "Crea el archivo docs/progreso.md con un título. PASO-A-PASO" \
   --archivo "docs/progreso.md" --criterio "existe docs/progreso.md" --prueba ci --todo | sed -n 's/^#\([0-9]*\) creada.*/\1/p')
 [ -n "$NP" ] && ok "tarea en directo creada (#$NP)" || mal "no se creó la tarea en directo"
-# fake_agente escribe poco a poco (1 s entre eventos) y después calla 15 s: con umbral 2 s, posible atasco.
-FAKE_AGENTE_PASO_S=1 FAKE_AGENTE_SILENCIO_S=15 python3 equipo.py demo una-vez > "$S.prog.log" 2>&1 &
+# fake_agente piensa (30 eventos thinking_tokens), escribe poco a poco (1 s entre eventos) y después calla 15 s:
+# con umbral 2 s, posible atasco.
+FAKE_AGENTE_PENSAR_N=30 FAKE_AGENTE_PENSAR_S=0.4 FAKE_AGENTE_PASO_S=1 FAKE_AGENTE_SILENCIO_S=15 \
+  python3 equipo.py demo una-vez > "$S.prog.log" 2>&1 &
 UNAVEZ=$!
 NP="$NP" PUERTO="$PUERTO" python3 - <<'PY' || FALLOS=$((FALLOS + 1))
-import json, os, sys, time, urllib.request
+import json, os, re, sys, time, urllib.request
 n = int(os.environ["NP"]); base = f"http://127.0.0.1:{os.environ['PUERTO']}"
 fallos = 0
 def get(ruta):
@@ -748,6 +750,42 @@ if pg is None:
 check(isinstance(pg["minutos"], int) and pg["limite_s"] and pg["limite_min"] and pg["ultima_actividad"]
       and isinstance(pg["inactivo_s"], int) and pg["agente"] == "claude",
       "progreso con minutos, límite, última actividad y agente", pg)
+# Mientras piensa: una sola línea viva «pensando… N s» con N creciente, y sin aviso de atasco.
+vistos, atascado, viva = [], False, None
+fin = time.time() + 30
+while time.time() < fin:
+    p = demo()
+    x = prog(p)
+    if not x:
+        break
+    if x.get("pensando_s"):
+        if x["ultima_linea"] != f"pensando… {x['pensando_s']} s":
+            vistos.append(("línea inesperada", x["ultima_linea"]))
+        if not vistos or vistos[-1] != x["pensando_s"]:
+            vistos.append(x["pensando_s"])
+        atascado = atascado or x["atasco"] or any(a.get("tipo") == "atasco" and a.get("numero") == n
+                                                   for a in p["atencion"])
+        if viva is None:  # «Ver progreso»: la línea viva va al final del log
+            r = get(f"/api/proyecto/demo/progreso/{n}")
+            if r.get("linea_viva"):
+                viva = r["log"].splitlines()[-1]
+    elif vistos:
+        break
+    time.sleep(0.3)
+nums = [v for v in vistos if isinstance(v, int)]
+check(len(nums) >= 2 and nums == sorted(nums) and nums[-1] > nums[0] and len(nums) == len(vistos),
+      "mientras piensa, /api/estado muestra «pensando… N s» con N creciente", vistos)
+check(nums and not atascado, "mientras piensa la tarea no sale como posible atasco", vistos)
+check(bool(viva) and re.search(r"\] pensando… \d+ s$", viva), "«Ver progreso» muestra la línea viva al final del log", viva)
+log = os.path.join("proyectos", "demo", "estado", "agentes", f"issue-{n}.log")
+texto = open(log, encoding="utf-8").read() if os.path.exists(log) else ""
+pens = re.findall(r"\] pensó (\d+) s$", texto, re.M)
+check(len(pens) == 1 and int(pens[0]) >= 2 and "pensando…" not in texto and "thinking_tokens" not in texto
+      and "sesión status" not in texto and "sesión  ·" not in texto,
+      "30 eventos thinking_tokens dejan una sola línea «pensó N s» en issue-N.log (ni «sesión thinking_tokens»)",
+      texto[-800:])
+check(texto.count("sesión iniciada · modelo fake-modelo") == 1, "init se muestra una vez: «sesión iniciada · modelo X»",
+      texto[-800:])
 pg = esperar(lambda: (lambda x: x if x and (x["archivos_cambiados"] or 0) >= 1 else None)(prog(demo())))
 check(pg is not None, "archivos cambiados en el worktree (git status --porcelain)", pg)
 log = os.path.join("proyectos", "demo", "estado", "agentes", f"issue-{n}.log")
@@ -789,8 +827,13 @@ PY
 LOGP="proyectos/demo/estado/agentes/issue-$NP.log"
 grep -q "CI: consulta" "$LOGP" && ok "la espera de la CI cuenta como actividad (consultas en el log)" || mal "sin consultas de CI en $LOGP"
 TOKF="ghp_$(printf 'Q7%.0s' $(seq 1 18))"
-grep -q "ghp_Q7…" "$LOGP" && [ -z "$(grep -rlF -- "$TOKF" "$S" "$S".* 2>/dev/null || true)" ] \
-  && ok "el token de la salida del agente se filtra en los logs" || mal "token sin filtrar en los logs"
+token_filtrado() {
+  grep -q "ghp_Q7…" "$LOGP" && [ -z "$(grep -rlF -- "$TOKF" "$S" "$S".* 2>/dev/null || true)" ]
+}
+# En un entorno lento la línea de stderr del agente puede tardar en llegar al log: se reintenta unos segundos.
+for _ in $(seq 1 20); do token_filtrado && break; sleep 0.5; done
+token_filtrado && ok "el token de la salida del agente se filtra en los logs" \
+  || { grep -n "stderr" "$LOGP" | tail -5 || true; mal "token sin filtrar en los logs"; }
 kill $PANEL 2>/dev/null || true
 python3 -c "
 import re; h=open('panel.html').read(); open('$S.panel.js','w').write(re.search(r'<script>(.*)</script>', h, re.S).group(1))"
