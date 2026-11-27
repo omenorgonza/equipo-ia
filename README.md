@@ -42,11 +42,17 @@ igual prioridad, la más antigua. Se salta las que tienen Bloqueo o esperan una 
 por agente**: Claude y el local trabajan en paralelo, pero cada uno con una sola tarea a la vez. Una P0 no
 interrumpe la tarea en curso del mismo agente: espera a que termine.
 
-**Dependencias.** Se escriben en la sección «Dependencias» de la issue (`#12`). Una dependencia cuenta como
-lista cuando está en **Testing / Review** o más allá, aunque no esté integrada. La tarea dependiente parte de
+**Dependencias.** Se escriben en la sección «Dependencias» de la issue (`#12`) **o** con la relación nativa
+**«Blocked by»** de GitHub (en la propia tarjeta: *Relationships → Mark as blocked by*). El coordinador usa la
+unión de las dos: la sección y las relaciones «blocked by» abiertas, que lee por REST
+(`GET repos/<repo>/issues/<n>/dependencies/blocked_by`; si esa API falla, solo cuenta la sección). Una
+«blocked by» de otro repo hace esperar mientras siga abierta. `tablero.py nueva --dep N` (y el campo
+Dependencias de «Nueva tarea» en el panel) escribe la sección y además crea la relación
+(`POST …/dependencies/blocked_by` con el id numérico de #N); si la API falla, avisa y la tarea se crea igual.
+Una dependencia cuenta como lista cuando está en **Testing / Review** o más allá, aunque no esté integrada. La tarea dependiente parte de
 `main`, sin los cambios de la anterior, así que si las dos tocan los mismos archivos, integra antes la primera.
 Si la dependencia sigue en Backlog o Planning, la dependiente espera indefinidamente: muévelas juntas o deja la
-dependiente fuera de To Do. El log lo muestra como `esperando_dependencias: [N]`.
+dependiente fuera de To Do (el panel lo avisa en «Requiere tu atención»). El log lo muestra como `esperando_dependencias: [N]`.
 
 **Integrar varias PR seguidas.** Hazlo de una en una y en el orden de la cadena. Después de cada integración,
 abre la siguiente: si GitHub muestra **Update branch**, púlsalo y espera a que la CI vuelva a salir en verde.
@@ -127,14 +133,17 @@ avisa en «Puesta a punto pendiente» mientras falte.
 
 - **¿Qué hago ahora?**: el siguiente paso de cada proyecto (ver la sección anterior).
 - **Requiere tu atención**: PR por revisar, tarjetas bloqueadas, avisos de
-  seguridad críticos/altos y CI en rojo en la rama principal, de todos los proyectos a la vez.
+  seguridad críticos/altos y CI en rojo en la rama principal, de todos los proyectos a la vez. También avisa
+  cuando una tarea de To Do espera a otra que no está ni en To Do, ni en curso, ni en review (Backlog, Planning
+  o fuera del tablero): se quedaría esperando para siempre.
   Toda tarjeta bloqueada tiene **Reanudar** (`coordinador.py reanudar N`: sigue desde el paso pendiente,
   sin volver a llamar al agente si su trabajo ya está hecho); las que fallaron por CI, pruebas o falta de
   cambios tienen además «Reintentar con el agente» (`reanudar N --desde agente`).
 - **Puesta a punto pendiente** (plegable): vistas del tablero, vista «Tablero» con columnas por otro campo
   que no es Estado (p. ej. Status), secreto TABLERO_TOKEN, PR de instalación.
 - **Una tarjeta por proyecto**: estado del README, resumen, contadores por columna, repos con su CI, tareas en
-  curso, enlaces al tablero y botones Arrancar/Parar/Ver log.
+  curso, enlaces al tablero y botones Arrancar/Parar/Ver log. Las tareas de To Do que esperan una dependencia
+  (sección o «Blocked by») muestran «espera a #N» con enlace a la dependencia.
 - **Guardar TABLERO_TOKEN** (botón en cada tarjeta): pegas un token clásico en un campo de contraseña; el panel
   comprueba con GitHub que es de tu usuario y que tiene los scopes `repo` y `project`, y solo entonces lo guarda
   con `gh secret set TABLERO_TOKEN` (por stdin) en **todos** los repos del proyecto, indicando en cuáles. El token

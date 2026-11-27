@@ -564,6 +564,73 @@ it = next(it for it in p["items"].values() if it.get("issue") == s["sig_integrad
 assert not it["fields"].get("Siguiente"), it["fields"]
 PY
 
+echo "== 4 octies. Dependencias «Blocked by» de GitHub: tablero.py nueva --dep, coordinador (unión con la sección)"
+num_de() { sed -n 's/^#\([0-9]*\) creada.*/\1/p'; }
+ND=$(python3 equipo.py demo tablero nueva "Dependencia en Backlog" --agente local --objetivo "Crea docs/dep-base.md." \
+  --archivo "docs/dep-base.md" --criterio "existe docs/dep-base.md" --prueba ci | num_de)
+NR=$(python3 equipo.py demo tablero nueva "Espera por relación" --agente local --objetivo "Crea docs/dep-rel.md." \
+  --archivo "docs/dep-rel.md" --criterio "existe docs/dep-rel.md" --prueba ci --todo | num_de)
+python3 equipo.py demo tablero nueva "Espera por --dep" --agente local --objetivo "Crea docs/dep-sec.md." \
+  --archivo "docs/dep-sec.md" --criterio "existe docs/dep-sec.md" --prueba ci --dep "$ND" --todo > "$S.dep1.log" 2>&1 || true
+NS=$(num_de < "$S.dep1.log")
+[ -n "$ND" ] && [ -n "$NR" ] && [ -n "$NS" ] && ok "tareas de dependencias creadas (#$ND Backlog, #$NR y #$NS To Do)" \
+  || { cat "$S.dep1.log"; mal "no se crearon las tareas de dependencias"; }
+ND="$ND" NR="$NR" NS="$NS" python3 - <<'PY' && grep -q "Blocked by #$ND: relación creada" "$S.dep1.log" \
+  && ok "tablero.py nueva --dep crea la relación «blocked by» (POST con el id numérico) y la sección" \
+  || { cat "$S.dep1.log"; mal "tablero.py nueva --dep no creó la relación"; }
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+k = lambda n: f"oscar/demo-app#{os.environ[n]}"
+i = s["issues"][k("NS")]
+assert i.get("blocked_by") == [k("ND")], i.get("blocked_by")
+assert f"### Dependencias\n\n#{os.environ['ND']}" in i["body"], i["body"]
+assert "api -X POST" in s["calls"], s["calls"][-10:]
+# #NR: sin sección de dependencias; Óscar añade «Blocked by #ND» desde la tarjeta en GitHub.
+assert "### Dependencias\n\nninguna" in s["issues"][k("NR")]["body"]
+s["issues"][k("NR")]["blocked_by"] = [k("ND")]
+json.dump(s, open(st, "w"), indent=1)
+PY
+FAKE_GH_FALLA_DEPENDENCIAS=1 python3 equipo.py demo tablero nueva "Dependencia con la API caída" --dep "$ND" > "$S.dep2.log" 2>&1 \
+  && grep -q "Aviso: no pude crear la relación «blocked by» #$ND" "$S.dep2.log" && [ -n "$(num_de < "$S.dep2.log")" ] \
+  && ok "si la API de dependencias falla, tablero.py nueva avisa y no aborta" || { cat "$S.dep2.log"; mal "fallo de la API de dependencias"; }
+python3 equipo.py demo una-vez > "$S.dep3.log" 2>&1 || true
+ND="$ND" NR="$NR" NS="$NS" python3 - "$S.dep3.log" <<'PY' && ok "coordinador: «blocked by» abierta sin sección espera igual que con la sección" \
+  || { cat "$S.dep3.log"; mal "coordinador: dependencias «blocked by»"; }
+import json, os, sys
+res = json.loads([l for l in open(sys.argv[1], encoding="utf-8").read().splitlines() if l.startswith("{")][-1])
+nr, ns = int(os.environ["NR"]), int(os.environ["NS"])
+assert nr in res.get("esperando_dependencias", []) and ns in res.get("esperando_dependencias", []), res
+s = json.load(open(os.environ["FAKE_GH_STATE"]))
+p = [p for p in s["projects"].values() if p["title"] == "Equipo IA · demo"][0]
+for n in (nr, ns):
+    f = next(it["fields"] for it in p["items"].values() if it.get("issue") == f"oscar/demo-app#{n}")
+    assert f.get("Estado") == "To Do" and not f.get("Bloqueo"), (n, f)
+PY
+ND="$ND" NR="$NR" python3 - <<'PY' && ok "coordinador: unión de sección y «blocked by»; cerrada → lista; API caída → solo la sección" \
+  || mal "coordinador: reglas de la unión de dependencias"
+import json, os, sys
+sys.argv = ["coordinador.py"]
+os.environ["EQUIPO_IA_PROYECTO"] = "demo"
+import coordinador as C
+proc = C.Procesador(C.cargar_config())
+nd, nr = int(os.environ["ND"]), int(os.environ["NR"])
+assert proc.dependencias_de(nr, []) == [nd], proc.dependencias_de(nr, [])
+assert proc.dependencias_de(nr, [nd, 1]) == [nd, 1], proc.dependencias_de(nr, [nd, 1])
+assert proc.dependencias_listas([nd]) == [nd]
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+s["issues"][f"oscar/demo-app#{nd}"]["state"] = "CLOSED"; json.dump(s, open(st, "w"), indent=1)
+try:
+    assert proc.dependencias_de(nr, []) == [], "una relación cerrada no hace esperar"
+finally:
+    s = json.load(open(st)); s["issues"][f"oscar/demo-app#{nd}"]["state"] = "OPEN"; json.dump(s, open(st, "w"), indent=1)
+os.environ["FAKE_GH_FALLA_DEPENDENCIAS"] = "1"
+assert proc.dependencias_de(nr, [7]) == [7]
+del os.environ["FAKE_GH_FALLA_DEPENDENCIAS"]
+assert proc.dependencias_listas(["otro/repo#3"]) == ["otro/repo#3"]
+assert C.relaciones_bloqueo([{"number": 3, "state": "closed", "repository_url": "https://api.github.com/repos/o/r"}], "x/y") \
+    == [{"repo": "o/r", "numero": 3, "abierta": False, "url": "https://github.com/o/r/issues/3"}]
+PY
+
 echo "== 5. Panel local"
 PUERTO=8791
 python3 equipo.py panel --puerto $PUERTO --no-abrir > "$S.panel.log" 2>&1 &
@@ -642,6 +709,34 @@ i, f = tarjeta("Tarea directa")
 assert f.get("Estado") == "To Do", f
 assert (f.get("Prioridad") or "").startswith("P2"), f
 PY
+mover_dep() {  # mover_dep <Estado>: mueve la tarjeta de la dependencia #ND en el tablero simulado
+  ND="$ND" E="$1" python3 -c "
+import json,os; st=os.environ['FAKE_GH_STATE']; s=json.load(open(st))
+p=[p for p in s['projects'].values() if p['title']=='Equipo IA · demo'][0]
+it=next(it for it in p['items'].values() if it.get('issue')=='oscar/demo-app#'+os.environ['ND'])
+it['fields']['Estado']=os.environ['E']; json.dump(s, open(st,'w'), indent=1)"
+}
+dep_panel() {  # dep_panel <Estado esperado de #ND | vivo>: «espera a #ND» en #NR y #NS y aviso solo si no está vivo
+  curl -sf "http://127.0.0.1:$PUERTO/api/estado?refrescar=1" | ND="$ND" NR="$NR" NS="$NS" E="$1" python3 -c "
+import json,os,sys; d={p['nombre']: p for p in json.load(sys.stdin)['proyectos']}['demo']
+nd, e = int(os.environ['ND']), os.environ['E']
+todo = {t['numero']: t for t in d['tarjetas'].get('To Do', [])}
+for n in (int(os.environ['NR']), int(os.environ['NS'])):
+    esp = todo[n].get('espera') or []
+    assert [x['numero'] for x in esp] == [nd] and esp[0]['texto'] == f'#{nd}', (n, esp)
+    assert esp[0]['url'].endswith(f'/issues/{nd}'), esp
+    av = [a for a in d['atencion'] if a['tipo'] == 'dependencia' and a['numero'] == n]
+    if e == 'vivo':
+        assert not av, av
+    else:
+        assert len(av) == 1 and f'espera a #{nd}, que está en {e}' in av[0]['texto'] and 'para siempre' in av[0]['texto'], av
+"
+}
+dep_panel Backlog && ok "panel: «espera a #N» en To Do y aviso con la dependencia en Backlog" || mal "panel: dependencia en Backlog"
+mover_dep Planning && dep_panel Planning && ok "panel: aviso con la dependencia en Planning" || mal "panel: dependencia en Planning"
+mover_dep Doing && dep_panel vivo && ok "panel: dependencia en curso → espera sin aviso" || mal "panel: dependencia en curso"
+mover_dep Backlog
+grep -q "espera a" panel.html && grep -q "t.espera" panel.html && ok "panel.html pinta «espera a #N» con enlace" || mal "panel.html: espera a"
 
 echo "== 5b. Guardar TABLERO_TOKEN desde el panel (tokens falsos; el valor no debe tocar disco ni respuestas)"
 XTOK=$(curl -s "http://127.0.0.1:$PUERTO/" | sed -n 's/.*const TOKEN = "\([^"]*\)".*/\1/p')
