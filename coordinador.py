@@ -1058,7 +1058,13 @@ class Git:
         self.clon = (PD / cfg["clon_local"]).resolve()
 
     def run(self, *args, cwd: Path | None = None, comprobar=True) -> str:
-        r = ejecutar(self.cfg["git_bin"] + list(args), cwd=cwd or self.clon, timeout=300)
+        for intento in range(6):
+            r = ejecutar(self.cfg["git_bin"] + list(args), cwd=cwd or self.clon, timeout=300)
+            # Otro git (p. ej. el panel consultando el worktree) tiene el index.lock un instante: se espera, no se borra.
+            if r.returncode == 0 or not ("index.lock" in (r.stderr or "") and "File exists" in (r.stderr or "")) \
+                    or intento == 5:
+                break
+            time.sleep(1)
         if r.returncode != 0:
             texto = (r.stderr or "") + (r.stdout or "")
             if PATRONES_RED.search(texto) or "Could not resolve host" in texto:
