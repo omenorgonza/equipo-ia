@@ -827,8 +827,9 @@ PY
 LOGP="proyectos/demo/estado/agentes/issue-$NP.log"
 grep -q "CI: consulta" "$LOGP" && ok "la espera de la CI cuenta como actividad (consultas en el log)" || mal "sin consultas de CI en $LOGP"
 TOKF="ghp_$(printf 'Q7%.0s' $(seq 1 18))"
+# El token falso vive en el código de fake_agente.py; sus .pyc (__pycache__) no son logs y no cuentan.
 token_filtrado() {
-  grep -q "ghp_Q7…" "$LOGP" && [ -z "$(grep -rlF -- "$TOKF" "$S" "$S".* 2>/dev/null || true)" ]
+  grep -q "ghp_Q7…" "$LOGP" && [ -z "$(grep -rlF --exclude-dir=__pycache__ --exclude='*.pyc' -- "$TOKF" "$S" "$S".* 2>/dev/null || true)" ]
 }
 # En un entorno lento la línea de stderr del agente puede tardar en llegar al log: se reintenta unos segundos.
 for _ in $(seq 1 20); do token_filtrado && break; sleep 0.5; done
