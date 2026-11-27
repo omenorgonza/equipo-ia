@@ -981,6 +981,80 @@ check(M.fuente_normativa(None) == [], "sin la variable, ese título no genera ha
 sys.exit(fallos)
 PY
 
+echo "== 5e. Documentación: README corto, páginas de docs/ y enlaces relativos (archivos y anclas)"
+DOCS_RAIZ="$ORIG" python3 - <<'PY' || FALLOS=$((FALLOS + 1))
+import os, re, sys
+from pathlib import Path
+from urllib.parse import unquote
+raiz = Path(os.environ["DOCS_RAIZ"])
+fallos = 0
+def check(cond, msg):
+    global fallos
+    print(("OK    " if cond else "FALLO ") + msg)
+    fallos += 0 if cond else 1
+def sin_bloques(texto):  # quita los bloques ``` / ~~~: sus «#» no son títulos ni sus [x](y) enlaces
+    return re.sub(r"^ {0,3}(```|~~~).*?^ {0,3}\1[^\n]*$", "", texto, flags=re.M | re.S)
+def sin_codigo(texto):  # además quita el código en línea (ejemplos de enlace, no enlaces)
+    return re.sub(r"`[^`\n]*`", "", sin_bloques(texto))
+def slug(titulo):  # ancla de GitHub: minúsculas, sin puntuación (salvo - y _), espacios → guiones
+    t = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", titulo.strip().lower())
+    return re.sub(r"[^\w\- ]", "", t).replace(" ", "-")
+def anclas(ruta):
+    vistas, res = {}, set()
+    for linea in sin_bloques(ruta.read_text(encoding="utf-8")).splitlines():  # GitHub conserva el `código` del título
+        m = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", linea)
+        if m:
+            s = slug(m.group(1).replace("`", ""))
+            n = vistas.get(s, 0); vistas[s] = n + 1
+            res.add(s if n == 0 else f"{s}-{n}")
+    return res
+paginas = ["guia-uso", "instalacion", "panel", "tablero", "ci-y-pruebas", "mantenimiento",
+           "agentes-y-lecciones", "arquitectura", "limitaciones"]
+docs = sorted((raiz / "docs").glob("*.md"))
+for p in ["README"] + paginas:
+    check((raiz / "docs" / f"{p}.md").is_file(), f"docs/{p}.md existe")
+readme = (raiz / "README.md").read_text(encoding="utf-8")
+check(len(readme.splitlines()) <= 60, f"README raíz corto ({len(readme.splitlines())} líneas, máximo 60)")
+for p in ["README"] + paginas:
+    check(f"](docs/{p}.md)" in readme, f"el README raíz enlaza docs/{p}.md")
+indice = (raiz / "docs" / "README.md").read_text(encoding="utf-8") if (raiz / "docs" / "README.md").is_file() else ""
+for p in paginas:
+    check(f"]({p}.md)" in indice, f"el índice docs/README.md enlaza {p}.md")
+for d in docs:
+    if d.name == "README.md":
+        continue
+    lineas = [l for l in d.read_text(encoding="utf-8").splitlines() if l.strip()]
+    check(len(lineas) >= 2 and lineas[0].startswith("# ") and "](README.md)" in lineas[1],
+          f"docs/{d.name}: empieza con título y enlace de vuelta al índice")
+arq = (raiz / "docs" / "arquitectura.md")
+check(arq.is_file() and re.search(r"^```mermaid\n(flowchart|graph) ", arq.read_text(encoding="utf-8"), re.M),
+      "docs/arquitectura.md incluye un diagrama Mermaid")
+cache, rotos, total = {}, [], 0
+for origen in [raiz / "README.md"] + docs:
+    texto = sin_codigo(origen.read_text(encoding="utf-8"))
+    for destino in re.findall(r"!?\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)", texto):
+        if re.match(r"^[a-z][a-z0-9+.-]*:", destino, re.I):  # http:, https:, mailto:… no son relativos
+            continue
+        total += 1
+        ruta, _, ancla = destino.partition("#")
+        archivo = (origen.parent / unquote(ruta)).resolve() if ruta else origen
+        nombre = f"{origen.relative_to(raiz)} → {destino}"
+        if not archivo.exists():
+            rotos.append(f"{nombre} (no existe el archivo)")
+        elif ancla:
+            if archivo.suffix != ".md" or archivo.is_dir():
+                rotos.append(f"{nombre} (ancla en algo que no es Markdown)")
+                continue
+            if archivo not in cache:
+                cache[archivo] = anclas(archivo)
+            if unquote(ancla).lower() not in cache[archivo]:
+                rotos.append(f"{nombre} (no existe el ancla)")
+for r in rotos:
+    print("      roto:", r)
+check(total > 0 and not rotos, f"enlaces relativos entre README.md y docs/*.md ({total} revisados, {len(rotos)} rotos)")
+sys.exit(1 if fallos else 0)
+PY
+
 echo "== 6. Compilación de todo el código"
 python3 -m compileall -q "$ORIG" -x 'proyectos|pruebas-dobles/__pycache__' > /dev/null && ok "compilación" || mal "compilación"
 
