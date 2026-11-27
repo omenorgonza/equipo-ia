@@ -28,6 +28,9 @@ python3 equipo.py family-finance parar        # parada suave: termina la tarea e
 ¿Primera vez? Empieza por la [instalación](docs/instalacion.md). ¿Ya está instalado? La
 [guía de uso](docs/guia-uso.md) explica el día a día.
 
+**Escalado automático al senior**: actívalo y ajústalo por proyecto desde el panel o el `config.json`
+([cómo](docs/agentes-y-lecciones.md#activar-y-ajustar-el-escalado)).
+
 ## Documentación
 
 Toda la documentación vive en [`docs/`](docs/README.md):

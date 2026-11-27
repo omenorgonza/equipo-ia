@@ -109,6 +109,10 @@
   .card[class*="c-"] { background: var(--pc-bg); border-top: 5px solid var(--pc); }
   .card.foco[class*="c-"] { border-color: var(--accent); border-top-color: var(--pc); }
   .at .p[class*="c-"] { background: var(--pc-tag); color: var(--pc-ink); font-weight: 600; }
+  .escalado { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; font-size: 13px; color: var(--muted); }
+  .escalado label.check { font-size: 13px; }
+  .escalado select { font: inherit; font-size: 13px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 6px;
+                     background: var(--bg); color: var(--ink); }
   .paleta { display: inline-flex; gap: 5px; align-items: center; margin-left: auto; }
   .paleta button { width: 16px; height: 16px; padding: 0; border-radius: 50%; background: var(--pc);
                    border: 2px solid transparent; }
@@ -333,6 +337,7 @@ function pintar() {
           ${(t.espera || []).length ? `<span class="espera">⏳ espera a ${t.espera.map(d =>
             `<a href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.estado || "fuera del tablero")}">${esc(d.texto)}</a>`).join(", ")}</span>` : ""}
           ${t.siguiente ? `<span class="sig-t">${esc(t.siguiente)}</span>` : ""}</div>`).join("")}</details>` : ""}
+      ${htmlEscalado(p)}
       <div class="acciones">
         ${p.tablero ? `<a class="btn mini" href="${esc(p.tablero)}" target="_blank" rel="noopener">Abrir tablero ↗</a>` : ""}
         ${p.activo ? `<button class="mini" onclick="accion('${p.nombre}','parar')">Parar equipo</button>`
@@ -343,6 +348,35 @@ function pintar() {
         <span class="paleta" title="Color del proyecto">${PALETA.map(c => `<button class="c-${c} ${c === p.color ? "sel" : ""}"
           title="${c}" aria-label="Color ${c}" onclick="cambiarColor('${p.nombre}','${c}')"></button>`).join("")}</span>
       </div></article>`; }).join("") || `<div class="vacio">Aún no hay proyectos. Usa «Nuevo proyecto» o «Añadir proyecto existente».</div>`;
+}
+
+// Escalado automático al senior (escalar_fallos / fallos_para_escalar del config.json del proyecto). Lo que se ha
+// cambiado y aún no se ha guardado sobrevive al repintado periódico.
+const escPendiente = {};
+function htmlEscalado(p) {
+  const e = {...(p.escalado || {activo: true, fallos: 2, opciones: [1, 2, 3], senior: "claude"}), ...(escPendiente[p.nombre] || {})};
+  const id = esc(p.nombre), activo = e.activo ? "checked" : "", sinEscalado = e.activo ? "" : "disabled";
+  const opciones = (e.opciones || [e.fallos]).map(n => `<option value="${n}" ${n === e.fallos ? "selected" : ""}>${n}</option>`).join("");
+  const sucio = escPendiente[p.nombre] ? " · sin guardar" : "";
+  return `<div class="escalado" title="Si el junior falla la tarea por su culpa, se reintenta desde un worktree limpio y después pasa al senior">
+        <label class="check"><input type="checkbox" id="esc-a-${id}" ${activo} onchange="cambiarEscalado('${id}')"> Escalar al senior (${esc(e.senior)})</label>
+        <label class="check">tras <select id="esc-n-${id}" ${sinEscalado} onchange="cambiarEscalado('${id}')">${opciones}</select> fallo(s) del junior</label>
+        <button class="mini" onclick="guardarEscalado('${id}')">Guardar escalado</button><span>${sucio}</span>
+      </div>`;
+}
+function cambiarEscalado(p) {
+  escPendiente[p] = {activo: document.getElementById(`esc-a-${p}`).checked,
+                     fallos: Number(document.getElementById(`esc-n-${p}`).value)};
+  pintar();
+}
+async function guardarEscalado(p) {
+  const r = await post(`/api/proyecto/${p}/escalado`, {activo: document.getElementById(`esc-a-${p}`).checked,
+                                                      fallos: Number(document.getElementById(`esc-n-${p}`).value)});
+  if (!r.ok) return toast(r.error || "No se pudo guardar el escalado");
+  delete escPendiente[p];
+  const pr = datos.proyectos.find(x => x.nombre === p);
+  if (pr) pr.escalado = {...pr.escalado, activo: r.activo, fallos: r.fallos};
+  pintar(); toast(r.mensaje);
 }
 
 // Botón de la primera acción del banner: reanudar / reintentar se hacen desde aquí; integrar o pasar a To Do, en GitHub.

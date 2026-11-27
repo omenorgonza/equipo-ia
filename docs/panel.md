@@ -36,6 +36,13 @@ volver a llamar al agente si su trabajo ya está hecho); las que fallaron por CI
 tienen además **Reintentar con el agente** (`reanudar N --desde agente`), que le pasa el fallo para que lo
 corrija.
 
+## Escalado al senior
+
+Cada proyecto tiene la casilla «Escalar al senior» y el selector «tras N fallo(s) del junior», con los valores de
+su `config.json`. «Guardar escalado» cambia solo `escalar_fallos` y `fallos_para_escalar` y el equipo en marcha los
+aplica en el ciclo siguiente. Detalles en
+[Activar y ajustar el escalado](agentes-y-lecciones.md#activar-y-ajustar-el-escalado).
+
 ## Guardar TABLERO_TOKEN
 
 Botón en cada tarjeta: pegas un token clásico en un campo de contraseña; el panel comprueba con GitHub que es

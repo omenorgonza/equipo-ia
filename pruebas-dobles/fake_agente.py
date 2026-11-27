@@ -122,9 +122,19 @@ elif "Crea el archivo docs/" in prompt:
     ruta = _re.search(r"Crea el archivo (docs/\S+?\.md)", prompt).group(1)
     Path(ruta).parent.mkdir(parents=True, exist_ok=True)
     # Guion de fallos del autor (marca [FALLO:…] del objetivo): fuera1 (escribe fuera de alcance la primera vez),
-    # junior (el agente local falla siempre), todos (falla cualquiera), cuota (el local agota la cuota).
+    # junior (el agente local falla siempre), todos (falla cualquiera), cuota (el local agota la cuota),
+    # junior1 (el local falla solo la primera vez), cuota2 (el local falla, agota la cuota y después falla siempre).
     fallo = (_re.search(r"\[FALLO:(\w+)\]", prompt) or [None, ""])[1]
     local = "--file" in a
+    vez_local = 0
+    if local and fallo in ("junior1", "cuota2"):  # invocaciones del local en esta issue, contando esta
+        n_issue = _re.search(r"issue #(\d+)", prompt).group(1)
+        cuenta = Path(os.environ["FAKE_GH_STATE"] + f".fallo-{fallo}-{n_issue}")
+        vez_local = int(cuenta.read_text() or 0) + 1 if cuenta.exists() else 1
+        cuenta.write_text(str(vez_local))
+    if fallo == "cuota2" and vez_local == 2:
+        print("Claude AI usage limit reached|1700000000", file=sys.stderr)
+        sys.exit(1)
     if fallo == "fuera1":
         n_issue = _re.search(r"issue #(\d+)", prompt).group(1)
         marca = Path(os.environ["FAKE_GH_STATE"] + f".fallo-fuera1-{n_issue}")
@@ -134,7 +144,8 @@ elif "Crea el archivo docs/" in prompt:
     elif fallo == "cuota" and local:
         print("Claude AI usage limit reached|1700000000", file=sys.stderr)
         sys.exit(1)
-    elif fallo == "todos" or (fallo == "junior" and local):
+    elif fallo == "todos" or (fallo == "junior" and local) or (fallo == "junior1" and vez_local == 1) \
+            or (fallo == "cuota2" and local):
         Path(ruta).write_text("# A medias\n")
         print("Error: no he sabido terminar la tarea", file=sys.stderr)
         sys.exit(1)
