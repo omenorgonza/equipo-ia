@@ -364,13 +364,14 @@ nueva_fallo() {  # nueva_fallo <nombre> <agente> <guion de fallo de fake_agente>
     --objetivo "Crea el archivo docs/$1.md con un título. [FALLO:$3]" \
     --archivo "docs/$1.md" --criterio "existe docs/$1.md" --prueba ci --todo | sed -n 's/^#\([0-9]*\) creada.*/\1/p'
 }
-config_demo() {  # config_demo <clave> <valor JSON> | config_demo restaurar
+config_demo() {  # config_demo <clave> <valor JSON> [<clave> <valor JSON>…] | config_demo restaurar
   if [ "$1" = restaurar ]; then cp "$S.demo-config.bak" proyectos/demo/config.json; return; fi
   cp proyectos/demo/config.json "$S.demo-config.bak"
-  CLAVE="$1" VALOR="$2" python3 - <<'PY'
-import json, os
+  python3 - "$@" <<'PY'
+import json, sys
 ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
-c[os.environ["CLAVE"]] = json.loads(os.environ["VALOR"])
+for clave, valor in zip(sys.argv[1::2], sys.argv[2::2]):
+    c[clave] = json.loads(valor)
 json.dump(c, open(ruta, "w"), indent=2)
 PY
 }
@@ -451,6 +452,90 @@ b = campos.get("Bloqueo") or ""
 assert campos["Estado"] == "To Do" and "Diff fuera de alcance: fuera-de-alcance.txt" in b and "intento(s)" not in b, campos
 assert issue["labels"] == ["agent:local"] and logs_agente("local") == 1, (issue["labels"], logs_agente("local"))
 assert pendientes("local") == 1, pendientes("local")
+PY
+
+config_demo fallos_para_escalar 1
+N=$(nueva_fallo fallo-uno local junior1)
+python3 equipo.py demo una-vez > "$S.fallo-uno.log" 2>&1 || true
+export LOGU="$S.fallo-uno.log"
+config_demo restaurar
+comprobar_rev "$N" "fallos_para_escalar: 1 → el junior que falla una vez pasa directamente al senior" <<'PY' || cat "$S.fallo-uno.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert issue["labels"] == ["agent:claude"] and "### Agente\n\nclaude\n" in issue["body"], (issue["labels"], issue["body"])
+assert logs_agente("local") == 1 and logs_agente("claude") == 1, (logs_agente("local"), logs_agente("claude"))
+assert any("pasa a `claude`" in c and "intentado 1 vez " in c for c in issue["comments"]), issue["comments"]
+PY
+# Óscar devuelve la tarea al junior: etiqueta otra vez en local y reanudar desde el agente.
+NR="$N" python3 - <<'PY'
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+s["issues"][f"oscar/demo-app#{os.environ['NR']}"]["labels"] = ["agent:local"]
+json.dump(s, open(st, "w"))
+PY
+python3 equipo.py demo reanudar "$N" --desde agente > /dev/null
+python3 equipo.py demo una-vez > "$S.fallo-uno2.log" 2>&1 || true
+export LOGU="$S.fallo-uno2.log"
+comprobar_rev "$N" "etiqueta devuelta al junior tras escalar: manda la etiqueta, campo Agente al día y sin Bloqueo" <<'PY' || cat "$S.fallo-uno2.log"
+from revlib import *
+import sqlite3
+b = campos.get("Bloqueo") or ""
+assert "no coincide" not in b and campos["Estado"] == "Testing / Review", campos
+assert issue["labels"] == ["agent:local"] and "### Agente\n\nlocal\n" in issue["body"], (issue["labels"], issue["body"])
+assert logs_agente("local") == 1 and logs_agente("claude") == 0, (logs_agente("local"), logs_agente("claude"))
+f = sqlite3.connect("proyectos/demo/estado/registro.db").execute(
+    "SELECT agente, tiempos FROM tareas WHERE issue=?", (n,)).fetchone()
+t = json.loads(f[1] or "{}")
+assert f[0] == "local" and "escalada_fallos" not in t and not t.get("fallos_cuenta"), (f[0], t.get("escalada_fallos"))
+PY
+
+config_demo fallos_para_escalar 3
+N=$(nueva_fallo fallo-tres local junior)
+python3 equipo.py demo una-vez > "$S.fallo-tres.log" 2>&1 || true
+export LOGU="$S.fallo-tres.log"
+config_demo restaurar
+comprobar_rev "$N" "fallos_para_escalar: 3 → el junior tiene tres intentos y después termina el senior" <<'PY' || cat "$S.fallo-tres.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert issue["labels"] == ["agent:claude"], issue["labels"]
+assert logs_agente("local") == 3 and logs_agente("claude") == 1, (logs_agente("local"), logs_agente("claude"))
+assert any("pasa a `claude`" in c and "intentado 3 veces" in c and "Intento 3 (local" in c for c in issue["comments"]), issue["comments"]
+assert pendientes("local") == 3, pendientes("local")
+PY
+
+config_demo espera_reintento_s 0
+N=$(nueva_fallo fallo-red local junior)
+FAKE_GH_RED_ETIQUETAS=agent:claude python3 equipo.py demo una-vez > "$S.fallo-red.log" 2>&1 || true
+export LOGU="$S.fallo-red.log"
+config_demo restaurar
+comprobar_rev "$N" "corte de red al cambiar la etiqueta durante el escalado: sin tercer intento del junior y senior en limpio" <<'PY' || cat "$S.fallo-red.log"
+from revlib import *
+assert os.path.exists(os.environ["FAKE_GH_STATE"] + f".red-etiquetas-{n}"), "el corte de red no se simuló"
+assert "error transitorio de red" in open(os.environ["LOGU"], encoding="utf-8").read()
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert issue["labels"] == ["agent:claude"] and "### Agente\n\nclaude\n" in issue["body"], (issue["labels"], issue["body"])
+assert logs_agente("local") == 2 and logs_agente("claude") == 1, (logs_agente("local"), logs_agente("claude"))
+assert en_rama("docs/fallo-red.md") == "# Hecho por el equipo\n", "claude no partió de un worktree limpio"
+assert len([c for c in issue["comments"] if "pasa a `claude`" in c]) == 1, issue["comments"]
+PY
+
+N=$(nueva_fallo fallo-reanuda local cuota2)
+python3 equipo.py demo una-vez > "$S.fallo-reanuda.log" 2>&1 || true
+export LOGU="$S.fallo-reanuda.log"
+comprobar_rev "$N" "el junior falla y después agota la cuota: Bloqueo tras dos intentos" <<'PY' || cat "$S.fallo-reanuda.log"
+from revlib import *
+b = campos.get("Bloqueo") or ""
+assert campos["Estado"] == "To Do" and "Cuota agotada" in b, campos
+assert issue["labels"] == ["agent:local"] and logs_agente("local") == 2 and logs_agente("claude") == 0, issue["labels"]
+PY
+python3 equipo.py demo reanudar "$N" > /dev/null
+python3 equipo.py demo una-vez > "$S.fallo-reanuda2.log" 2>&1 || true
+export LOGU="$S.fallo-reanuda2.log"
+comprobar_rev "$N" "tras Bloqueo y reanudar, el junior solo tiene el intento que le quedaba" <<'PY' || cat "$S.fallo-reanuda2.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert issue["labels"] == ["agent:claude"], issue["labels"]
+assert logs_agente("local") == 1 and logs_agente("claude") == 1, (logs_agente("local"), logs_agente("claude"))
 PY
 
 echo "== 4 bis. Vista «Tablero»: columnas por Estado (sin aviso) o por otro campo (aviso con el arreglo)"
@@ -668,6 +753,43 @@ CODIGO=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: applic
 [ "$CODIGO" = "403" ] && ok "crear tarea sin token rechazada" || mal "crear tarea sin token devolvió $CODIGO"
 TOKEN=$(curl -sf "http://127.0.0.1:$PUERTO/" | sed -n 's/.*const TOKEN = "\([^"]*\)".*/\1/p')
 [ -n "$TOKEN" ] && ok "token del panel" || mal "no encontré el token en la página del panel"
+cp proyectos/demo/config.json "$S.demo-config-panel.bak"
+PUERTO=$PUERTO TOKEN=$TOKEN EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "panel: ajustes del escalado (casilla y selector) guardados solo en esas claves y aplicados en el ciclo siguiente" || mal "panel: ajustes del escalado"
+import json, os, urllib.error, urllib.request
+import coordinador as C
+base = f"http://127.0.0.1:{os.environ['PUERTO']}"
+def estado():
+    return {p["nombre"]: p for p in json.load(urllib.request.urlopen(base + "/api/estado"))["proyectos"]}
+def guardar(cuerpo):
+    req = urllib.request.Request(base + "/api/proyecto/demo/escalado", data=json.dumps(cuerpo).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Token": os.environ["TOKEN"]})
+    try:
+        r = urllib.request.urlopen(req); return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, json.load(e)
+e = estado()["demo"]["escalado"]
+assert e["activo"] is True and e["fallos"] == 2 and e["senior"] == "claude" and 1 in e["opciones"] and 3 in e["opciones"], e
+antes = json.load(open("proyectos/demo/config.json"))
+cfg = C.cargar_config()  # lo que tiene en memoria un `vigilar` ya arrancado
+assert cfg["escalar_fallos"] is True and cfg["fallos_para_escalar"] == 2, cfg
+for malo in ({"activo": True, "fallos": 9}, {"activo": "si", "fallos": 2}, {"activo": True, "fallos": "2"}):
+    codigo, r = guardar(malo)
+    assert codigo == 400 and not r["ok"], (malo, codigo, r)
+assert json.load(open("proyectos/demo/config.json")) == antes, "un valor no válido cambió el config.json"
+codigo, r = guardar({"activo": False, "fallos": 3})
+assert codigo == 200 and r["ok"], r
+despues = json.load(open("proyectos/demo/config.json"))
+assert despues["escalar_fallos"] is False and despues["fallos_para_escalar"] == 3, despues
+quitar = lambda c: {k: v for k, v in c.items() if k not in ("escalar_fallos", "fallos_para_escalar")}
+assert quitar(despues) == quitar(antes), "el panel cambió otras claves del config.json"
+e = estado()["demo"]["escalado"]
+assert e["activo"] is False and e["fallos"] == 3, e
+C.recargar_escalado(cfg)  # lo que hace `vigilar` al empezar cada ciclo
+assert cfg["escalar_fallos"] is False and cfg["fallos_para_escalar"] == 3, cfg
+PY
+cp "$S.demo-config-panel.bak" proyectos/demo/config.json
+grep -q "htmlEscalado(p)" panel.html && grep -q "/escalado" panel.html && grep -q 'id="esc-a-' panel.html \
+  && grep -q 'id="esc-n-' panel.html && ok "panel.html pinta la casilla y el selector del escalado" || mal "panel.html: escalado"
 tarea() {  # tarea <proyecto> <json> → imprime «código cuerpo»
   curl -s -w '\n%{http_code}' -X POST -H "Content-Type: application/json" -H "X-Token: $TOKEN" -d "$2" "$API/$1/tarea"
 }
@@ -944,6 +1066,28 @@ class P(HTMLParser):
         if t in ("section", "div", "form"):
             assert s.pila and s.pila.pop() == t, (t, s.getpos())
 p = P(); p.feed(open("panel.html", encoding="utf-8").read().split("<script>")[0]); assert not p.pila, p.pila
+PY
+python3 - <<'PY' && ok "HTML de los ajustes del escalado bien anidado" || mal "HTML de los ajustes del escalado mal anidado (div/label/select)"
+import re
+from html.parser import HTMLParser
+TAGS = ("div", "label", "select", "option", "span")
+class P(HTMLParser):
+    def __init__(s): super().__init__(); s.pila = []; s.vistos = set()
+    def handle_starttag(s, t, a):
+        s.vistos.add(t)
+        if t in TAGS: s.pila.append(t)
+    def handle_endtag(s, t):
+        if t in TAGS:
+            assert s.pila and s.pila.pop() == t, (t, s.getpos())
+h = open("panel.html", encoding="utf-8").read()
+cuerpo = re.search(r"function htmlEscalado\(p\) \{(.*?)\n\}", h, re.S).group(1)
+opciones = re.search(r"map\(n => `(.*?)`\)", cuerpo, re.S).group(1)
+plantilla = re.search(r"return `(.*?)`;", cuerpo, re.S).group(1)
+p = P()
+for trozo in (opciones, plantilla):
+    p.feed(re.sub(r"\$\{[^}]*\}", "", trozo))
+assert not p.pila, p.pila
+assert {"input", "select", "option", "button", "label"} <= p.vistos, p.vistos
 PY
 
 echo "== 5d. Palabras de normativa por proyecto (mantenimiento.json + variable NORMATIVA_PALABRAS)"

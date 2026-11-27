@@ -418,6 +418,14 @@ elif a[:2] == ["issue", "view"]:
     out = issue_json(s, s["issues"][clave(repo_de(a), int(a[2]))])
 elif a[:2] == ["issue", "edit"]:
     i = s["issues"][clave(repo_de(a), int(a[2]))]
+    # FAKE_GH_RED_ETIQUETAS=<etiqueta>: el primer intento de poner esa etiqueta en cada issue es un corte de red
+    # (Transitorio en el coordinador) y no cambia nada.
+    red = os.environ.get("FAKE_GH_RED_ETIQUETAS")
+    marca_red = f"{ST}.red-etiquetas-{i['number']}"
+    if red and red in opt(a, "--add-label", True) and not os.path.exists(marca_red):
+        open(marca_red, "w").write("1")
+        print("error connecting to api.github.com: connection reset by peer", file=sys.stderr)
+        sys.exit(1)
     for l in opt(a, "--remove-label", True):
         i["labels"].remove(l)
     for l in opt(a, "--add-label", True):

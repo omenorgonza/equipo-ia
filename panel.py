@@ -275,7 +275,7 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
               "repos": [], "tablero": tb.get("url"),
               "activo": E.coordinador_activo(nombre), "columnas": {e: 0 for e in T.ESTADOS}, "atencion": [],
               "tarjetas": {}, "error": None, "pruebas": pruebas_proyecto(cfg), "progreso": [],
-              "siguiente": siguiente_json({})}
+              "siguiente": siguiente_json({}), "escalado": escalado_proyecto(cfg)}
     try:
         prog = progreso_tareas(nombre, cfg)
     except Exception:  # noqa: BLE001 — el panel nunca se cae por el progreso
@@ -574,6 +574,39 @@ def cambiar_color(nombre: str, color) -> tuple[dict, int]:
     return {"ok": True, "color": color, "mensaje": f"Color de {nombre}: {color}"}, 200
 
 
+def escalado_proyecto(cfg: dict) -> dict:
+    """Ajustes del escalado automático al senior tal como los aplicará el coordinador (config.json sobre equipo.json)."""
+    return {"activo": bool(cfg.get("escalar_fallos", True)),
+            "fallos": C.normalizar_fallos(cfg.get("fallos_para_escalar")),
+            "opciones": list(C.FALLOS_PARA_ESCALAR),
+            "senior": (cfg.get("revision") or {}).get("senior") or C.REVISION_DEFECTO["senior"]}
+
+
+def guardar_escalado(nombre: str, d: dict) -> tuple[dict, int]:
+    """POST /api/proyecto/<n>/escalado: cambia solo escalar_fallos y fallos_para_escalar del config.json del proyecto
+    (escritura atómica: `vigilar` lo relee en el ciclo siguiente sin ver un archivo a medias)."""
+    activo, fallos = d.get("activo"), d.get("fallos")
+    if not isinstance(activo, bool):
+        return {"ok": False, "error": "«activo» debe ser true o false"}, 400
+    if isinstance(fallos, bool) or not isinstance(fallos, int) or fallos not in C.FALLOS_PARA_ESCALAR:
+        return {"ok": False, "error": f"«fallos» debe ser uno de {list(C.FALLOS_PARA_ESCALAR)}"}, 400
+    ruta = E.PROYECTOS / nombre / "config.json"
+    try:
+        cfg = json.loads(ruta.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": f"No pude leer {ruta.name}: {str(e)[:200]}"}, 500
+    cfg["escalar_fallos"], cfg["fallos_para_escalar"] = activo, fallos
+    tmp = ruta.with_name(ruta.name + ".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tmp.replace(ruta)
+    with _cache_lock:
+        _cache.clear()
+    texto = (f"escala al senior tras {fallos} fallo(s) del junior" if activo
+             else "desactivado: el primer fallo bloquea la tarea")
+    return {"ok": True, "activo": activo, "fallos": fallos,
+            "mensaje": f"Escalado de {nombre}: {texto}. Se aplica en el siguiente ciclo del equipo."}, 200
+
+
 def reanudar(nombre: str, numero: int) -> dict:
     """Continúa una tarea bloqueada desde su paso pendiente (sin --desde: no repite el trabajo del agente)."""
     r = E.script(nombre, "coordinador.py", "reanudar", str(numero), capturar=True, timeout=60)
@@ -650,11 +683,13 @@ class Manejador(BaseHTTPRequestHandler):
         if not isinstance(cuerpo, dict):
             return self._json({"error": "cuerpo no válido"}, 400)
         ruta = self.path
-        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/(arrancar|parar|reintentar|reanudar|color)$", ruta)
+        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/(arrancar|parar|reintentar|reanudar|color|escalado)$", ruta)
         if m:
             nombre, accion = m.groups()
             if nombre not in E.proyectos():
                 return self._json({"error": "proyecto desconocido"}, 404)
+            if accion == "escalado":
+                return self._json(*guardar_escalado(nombre, cuerpo))
             if accion == "color":
                 return self._json(*cambiar_color(nombre, cuerpo.get("color")))
             if accion == "arrancar":

@@ -28,6 +28,28 @@ python3 equipo.py family-finance parar        # parada suave: termina la tarea e
 ¿Primera vez? Empieza por la [instalación](docs/instalacion.md). ¿Ya está instalado? La
 [guía de uso](docs/guia-uso.md) explica el día a día.
 
+## Escalado automático al senior
+
+Cuando el junior (p. ej. `local`) falla una tarea por su culpa (termina con error, no cambia nada, se sale de los
+archivos permitidos o deja las pruebas en rojo), el coordinador la repite desde un worktree limpio y, cuando ha
+gastado sus intentos, la pasa al senior (`revision.senior`, por defecto `claude`): etiqueta, campo Agente y un
+comentario con el historial. Cuota agotada, Ollama caído o la red no cuentan como fallo del agente.
+
+**Desde el panel.** Cada proyecto tiene la casilla «Escalar al senior» y el selector «tras N fallo(s) del junior».
+Pulsa «Guardar escalado»: el panel cambia solo esas dos claves del `config.json` del proyecto y el equipo en marcha
+las aplica en el ciclo siguiente, sin reiniciar.
+
+**A mano, en `proyectos/<nombre>/config.json`** (o en `equipo.json` para todos los proyectos):
+
+```jsonc
+"escalar_fallos": true,      // false: el primer fallo bloquea la tarea, sin reintento ni escalado
+"fallos_para_escalar": 2     // intentos del junior antes de pasar al senior (1–5; con 1 escala al primer fallo)
+```
+
+Los intentos gastados se guardan en el registro: tras un Bloqueo y `reanudar`, el junior solo tiene los que le
+quedaban (si ya los gastó, la tarea pasa directamente al senior). Si después de escalar devuelves la etiqueta al
+junior, manda la etiqueta: el coordinador pone el campo Agente al día y el junior empieza con todos sus intentos.
+
 ## Documentación
 
 Toda la documentación vive en [`docs/`](docs/README.md):

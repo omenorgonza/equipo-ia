@@ -83,6 +83,7 @@
   },
   "contexto_minimo_local": 16384,
   "escalar_fallos": true,
+  "fallos_para_escalar": 2,
   "revision": {
     "rondas_minimas": 2,
     "rondas_maximas": 3,

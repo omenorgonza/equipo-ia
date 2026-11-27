@@ -50,7 +50,11 @@ PD = (LAB / "proyectos" / PROYECTO) if PROYECTO else LAB
 EQUIPO_JSON = LAB / "equipo.json"
 CLAVES_COMPARTIDAS = ("agentes", "ollama_url", "gh_bin", "git_bin", "max_trabajadores", "max_por_proveedor",
                       "timeout_agente_s", "timeout_pruebas_s", "espera_reintento_s", "intervalo_consulta_s",
-                      "contexto_minimo_local", "pruebas_comunes", "revision", "escalar_fallos")
+                      "contexto_minimo_local", "pruebas_comunes", "revision", "escalar_fallos",
+                      "fallos_para_escalar")
+# Escalado automático al senior: el panel cambia estas claves del config.json y `vigilar` las relee en cada ciclo.
+CLAVES_ESCALADO = ("escalar_fallos", "fallos_para_escalar")
+FALLOS_PARA_ESCALAR = (1, 2, 3, 4, 5)  # intentos del junior antes de pasar la tarea al senior
 # Revisión entre agentes (equipo.json → revision; cada proyecto puede cambiar claves en su config.json).
 REVISION_DEFECTO = {
     "rondas_minimas": 2, "rondas_maximas": 3, "revisores": {"local": "claude", "claude": "claude"}, "senior": "claude",
@@ -128,6 +132,29 @@ def fusionar(base: dict, encima: dict) -> dict:
     return r
 
 
+def normalizar_fallos(valor) -> int:
+    """Intentos del junior antes de escalar (1–5; sin valor o con uno no válido, 2)."""
+    try:
+        n = int(valor)
+    except (TypeError, ValueError):
+        return 2
+    return max(FALLOS_PARA_ESCALAR[0], min(FALLOS_PARA_ESCALAR[-1], n))
+
+
+def recargar_escalado(cfg: dict) -> None:
+    """Relee del config.json las claves del escalado (las cambia el panel) sin reiniciar `vigilar`.
+    Si el archivo no se puede leer en ese instante, se mantienen los valores anteriores."""
+    try:
+        nuevo = cargar_config()
+    except (Exception, SystemExit) as e:  # noqa: BLE001 — un config a medio escribir no para el equipo
+        log(f"No pude releer el config.json ({str(e)[:160]}); sigo con el escalado anterior")
+        return
+    for k in CLAVES_ESCALADO:
+        if cfg.get(k) != nuevo.get(k):
+            log(f"Escalado: {k} = {json.dumps(nuevo.get(k))} (cambiado en el config.json)")
+            cfg[k] = nuevo.get(k)
+
+
 def cargar_config() -> dict:
     ruta = PD / "config.json"
     if not ruta.exists():
@@ -152,6 +179,7 @@ def cargar_config() -> dict:
     cfg.setdefault("rama_por_defecto", None)
     cfg.setdefault("fuente_cola", "etiquetas")
     cfg["escalar_fallos"] = bool(cfg.get("escalar_fallos", True))  # junior que falla: reintento y después el senior
+    cfg["fallos_para_escalar"] = normalizar_fallos(cfg.get("fallos_para_escalar"))
     rev = fusionar(REVISION_DEFECTO, cfg.get("revision") or {})
     rev["rondas_minimas"] = max(2, int(rev["rondas_minimas"]))  # nunca menos de dos rondas
     rev["rondas_maximas"] = max(rev["rondas_minimas"], int(rev["rondas_maximas"]))
@@ -1579,14 +1607,37 @@ class Procesador:
 
     def _procesar_reintentando(self, con, issue_gh: dict, intentos: list[dict]) -> str:
         """Fallo del agente por su culpa (código ≠ 0, sin cambios, fuera de alcance, pruebas en rojo): el junior repite
-        una vez desde un worktree limpio y, si vuelve a fallar, la tarea pasa al senior. Cuota, Ollama, red… no."""
+        desde un worktree limpio hasta gastar `fallos_para_escalar` intentos y después la tarea pasa al senior.
+        Cuota, Ollama, red… no. Los intentos gastados se guardan en el registro: Bloqueo y `reanudar` no los reponen."""
+        self._escalar_si_agotado(con, issue_gh, intentos)
         while True:
             try:
                 return self._procesar(con, issue_gh)
             except Bloqueo as b:
-                if not (b.culpa and self.cfg["escalar_fallos"]) or len(intentos) >= 4:
+                if not (b.culpa and self.cfg["escalar_fallos"]) or len(intentos) > self.cfg["fallos_para_escalar"] + 1:
                     raise
                 self._tras_fallo_agente(con, issue_gh, b, intentos)
+
+    def _escalar_si_agotado(self, con, issue_gh: dict, intentos: list[dict]) -> None:
+        """Al empezar una pasada (p. ej. tras Bloqueo y `reanudar`): si el junior ya gastó sus intentos y hay senior,
+        la tarea pasa al senior sin que el junior repita."""
+        numero = issue_gh["number"]
+        f = obtener(con, self.repo, numero)
+        if intentos or not f or not self.cfg["escalar_fallos"] or paso_hecho(f, "agente"):
+            return
+        t = json.loads(f["tiempos"] or "{}")
+        if t.get("escalada_fallos"):
+            return  # ya escalada (o con el aviso a medias): lo resuelve _procesar
+        agente = agente_de_etiquetas(self.cfg, {l["name"] for l in issue_gh.get("labels", [])})
+        if not agente or agente == self.cfg["revision"].get("senior"):
+            return
+        senior = self._senior_disponible(agente)
+        gastados = (t.get("fallos_cuenta") or {}).get(agente, 0)
+        if not senior or gastados < self.cfg["fallos_para_escalar"]:
+            return
+        log(f"#{numero}: '{agente}' ya gastó {gastados} intento(s) (fallos_para_escalar: "
+            f"{self.cfg['fallos_para_escalar']}); no repite")
+        self._escalar_por_fallos(con, issue_gh, agente, senior, t.get("fallos_agente") or [], gastados)
 
     def _tras_fallo_agente(self, con, issue_gh: dict, b: Bloqueo, intentos: list[dict]) -> None:
         """Anota el intento y prepara el siguiente (mismo agente o el senior). Sin más intentos, Bloqueo con historial."""
@@ -1596,20 +1647,23 @@ class Procesador:
         intentos.append({"agente": agente, "causa": b.causa, "evidencia": b.evidencia, "cuando": ahora()})
         t = self._tiempos(con, numero)
         t["fallos_agente"] = ((t.get("fallos_agente") or []) + [intentos[-1]])[-6:]
+        cuenta = t.get("fallos_cuenta") or {}  # intentos gastados por agente: sobreviven a Bloqueo y `reanudar`
+        cuenta[agente] = cuenta.get(agente, 0) + 1
+        t["fallos_cuenta"] = cuenta
         actualizar(con, self.repo, numero, tiempos=json.dumps(t))
         senior_cfg = self.cfg["revision"].get("senior")
         if agente != senior_cfg:  # el junior aprende de cada fallo, no solo del último
             anotar_leccion_pendiente(agente, numero, b.causa, b.evidencia or "(sin log)")
             b.anotada = True
-        propios = sum(1 for x in intentos if x["agente"] == agente)
+        propios, maximo = cuenta[agente], self.cfg["fallos_para_escalar"]
         senior = self._senior_disponible(agente)
-        if agente != senior_cfg and propios < 2:
-            log(f"#{numero}: '{agente}' falló ({_corto(b.causa, 160)}); reintento desde un worktree limpio")
+        if agente != senior_cfg and propios < maximo:
+            log(f"#{numero}: '{agente}' falló ({_corto(b.causa, 160)}); intento {propios + 1}/{maximo} "
+                "desde un worktree limpio")
             self._preparar_reintento(con, numero, f)
             return
         if agente != senior_cfg and senior:
-            self._escalar_por_fallos(con, issue_gh, agente, senior, intentos)
-            self._preparar_reintento(con, numero, f)
+            self._escalar_por_fallos(con, issue_gh, agente, senior, intentos, propios)
             return
         b.historial = lineas_intentos(intentos)
         b.causa = f"{b.causa} · {len(intentos)} intento(s): " + ", ".join(f"{x['agente']} ✗" for x in intentos)
@@ -1622,33 +1676,78 @@ class Procesador:
         if paso_hecho(f, "agente") and not paso_hecho(f, "commit"):
             actualizar(con, self.repo, numero, paso="worktree")
 
-    def _escalar_por_fallos(self, con, issue_gh: dict, junior: str, senior: str, intentos: list[dict]) -> None:
-        """Etiqueta, campo Agente y comentario: la tarea pasa al senior, que parte de un worktree limpio."""
+    def _escalar_por_fallos(self, con, issue_gh: dict, junior: str, senior: str, intentos: list[dict],
+                            veces: int) -> None:
+        """La tarea pasa al senior. Primero se limpia el worktree y se guarda la decisión en el registro; después se
+        avisa en GitHub. Si GitHub falla a medias (red), la pasada siguiente completa el aviso y sigue con el senior
+        sin un intento más del junior."""
         numero = issue_gh["number"]
-        ags = self.cfg["agentes"]
+        self._preparar_reintento(con, numero, obtener(con, self.repo, numero))
         t = self._tiempos(con, numero)
-        t["escalada_fallos"] = senior
+        t["escalada_fallos"] = {"de": junior, "a": senior, "avisada": False, "veces": veces,
+                                "intentos": lineas_intentos(intentos)}
         actualizar(con, self.repo, numero, agente=senior, tiempos=json.dumps(t))
         progreso_agente(numero, senior)
-        log(f"#{numero}: '{junior}' falló {sum(1 for x in intentos if x['agente'] == junior)} veces; "
-            f"escala al senior '{senior}'")
+        log(f"#{numero}: '{junior}' falló {veces} {'vez' if veces == 1 else 'veces'}; escala al senior '{senior}'")
+        self._avisar_escalada_fallos(con, issue_gh)
+
+    def _avisar_escalada_fallos(self, con, issue_gh: dict) -> None:
+        """Etiqueta, campo Agente y comentario del escalado por fallos. Cada paso se puede repetir sin efectos raros."""
+        numero = issue_gh["number"]
+        ags = self.cfg["agentes"]
+        e = self._tiempos(con, numero)["escalada_fallos"]
+        junior, senior, veces = e["de"], e["a"], e.get("veces") or 0
         self.gh.etiquetas(numero, ags[senior]["etiqueta"], [ags[junior]["etiqueta"]])
+        issue_gh["labels"] = [l for l in issue_gh.get("labels", [])
+                              if l["name"] not in (ags[junior]["etiqueta"], ags[senior]["etiqueta"])] \
+            + [{"name": ags[senior]["etiqueta"]}]
         cuerpo = (self.gh.issue(numero).get("body") or issue_gh.get("body") or "")
         nuevo = cambiar_campo_agente(cuerpo, senior)
         if nuevo != cuerpo:
             self.gh.editar_cuerpo_issue(numero, nuevo)
         issue_gh["body"] = nuevo
-        issue_gh["labels"] = [l for l in issue_gh.get("labels", []) if l["name"] != ags[junior]["etiqueta"]] \
-            + [{"name": ags[senior]["etiqueta"]}]
-        self.gh.comentar(numero, f"**La tarea pasa a `{senior}` (senior) 🤝**\n\n`{junior}` la ha intentado dos veces sin "
-                                 f"terminarla. `{senior}` empieza desde un worktree limpio en la misma rama.\n\n"
-                                 f"Intentos:\n{publicable(lineas_intentos(intentos))}\n")
+        self.gh.comentar(numero, f"**La tarea pasa a `{senior}` (senior) 🤝**\n\n`{junior}` la ha intentado {veces} "
+                                 f"{'vez' if veces == 1 else 'veces'} sin terminarla. `{senior}` empieza desde un "
+                                 f"worktree limpio en la misma rama.\n\nIntentos:\n{publicable(e.get('intentos') or '')}\n")
+        t = self._tiempos(con, numero)
+        t["escalada_fallos"] = {**e, "avisada": True}
+        actualizar(con, self.repo, numero, tiempos=json.dumps(t))
+
+    def _estado_escalada_fallos(self, con, issue_gh: dict) -> str | None:
+        """Senior de un escalado por fallos vigente (o None). Completa el aviso si quedó a medias y, si alguien ha
+        devuelto la etiqueta a otro agente, manda la etiqueta: campo Agente al día y contador de fallos a cero."""
+        numero = issue_gh["number"]
+        e = self._tiempos(con, numero).get("escalada_fallos")
+        if not e:
+            return None
+        if isinstance(e, str):  # registro anterior a #40: el aviso ya estaba hecho
+            e = {"de": None, "a": e, "avisada": True}
+        if not e.get("avisada"):
+            log(f"#{numero}: el aviso del escalado a '{e['a']}' quedó a medias en GitHub; lo completo")
+            self._avisar_escalada_fallos(con, issue_gh)
+            return e["a"]
+        etq = agente_de_etiquetas(self.cfg, {l["name"] for l in issue_gh.get("labels", [])})
+        if not etq or etq == e["a"]:
+            return e["a"]
+        log(f"#{numero}: la etiqueta ha vuelto a '{etq}' tras escalar a '{e['a']}'; manda la etiqueta y "
+            f"'{etq}' empieza con todos sus intentos")
+        cuerpo = issue_gh.get("body") or ""
+        nuevo = cambiar_campo_agente(cuerpo, etq)
+        if nuevo != cuerpo:  # antes de tocar el registro: si GitHub falla, la pasada siguiente lo repite
+            self.gh.editar_cuerpo_issue(numero, nuevo)
+            issue_gh["body"] = nuevo
+        t = self._tiempos(con, numero)
+        t.pop("escalada_fallos", None)
+        t["fallos_cuenta"], t["fallos_agente"] = {}, []
+        actualizar(con, self.repo, numero, agente=etq, tiempos=json.dumps(t))
+        return None
 
     def _procesar(self, con, issue_gh: dict) -> str:
         numero, titulo = issue_gh["number"], issue_gh["title"]
+        senior_fallos = self._estado_escalada_fallos(con, issue_gh)
         t_ini = self._tiempos(con, numero)
         esc = (t_ini.get("revision_meta") or {}).get("escalada")
-        agente, datos = validar_issue(self.cfg, issue_gh, (esc["a"] if esc else None) or t_ini.get("escalada_fallos"))
+        agente, datos = validar_issue(self.cfg, issue_gh, (esc["a"] if esc else None) or senior_fallos)
         if esc and agente != esc["a"]:
             if esc.get("avisada"):  # la etiqueta ya se cambió y alguien la ha devuelto a otro agente: manda la etiqueta
                 self._guardar_meta(con, numero, escalada=None)
@@ -2681,6 +2780,7 @@ def cmd_vigilar(_a) -> None:
         log(f"Vigilando {cfg['repo']} cada {cfg['intervalo_consulta_s']} s (python coordinador.py parar para detener)")
         try:
             while not STOP_PATH.exists():
+                recargar_escalado(cfg)  # el panel puede activar, desactivar o ajustar el escalado en caliente
                 try:
                     res = procesar_cola(cfg)
                 except Transitorio as e:
