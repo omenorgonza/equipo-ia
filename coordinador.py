@@ -14,6 +14,8 @@ Operaciones principales:
   parar                Pide a `vigilar` que se detenga tras la tarea en curso.
   estado               Muestra el registro local de tareas.
   reanudar N           Vuelve a encolar la issue N desde el paso pendiente.
+  agente [N AGENTE]    Cambia el agente de la tarjeta N (Backlog, Planning o To Do); sin argumentos, sincroniza
+                       el campo Agente del tablero con las etiquetas agent:*.
 Auxiliares:
   iniciar              Crea config.json a partir de config.example.json.
   configurar-local     Fija el modelo de Ollama de un agente local (--agente, por defecto «local»).
@@ -1048,6 +1050,150 @@ def actualizar_siguiente(cfg: dict) -> dict | None:
         log(texto)
     _ultimo_siguiente[cfg["repo"]] = rec["resumen"]
     return rec
+
+
+# --------------------------------------------------------------------------- agente asignado (campo Agente del tablero)
+
+RECUERDO_AGENTES = "agentes-tablero.json"   # en estado/: valor del campo Agente tras la última sincronización
+
+
+def agentes_activos(agentes: dict | None) -> list[str]:
+    """Agentes activos con etiqueta y nombre válido, en el orden de la config: las opciones del campo Agente."""
+    return [n for n, a in (agentes or {}).items()
+            if isinstance(a, dict) and a.get("activo", True) and isinstance(a.get("etiqueta"), str)
+            and T.NOMBRE_AGENTE_OK.match(n)]
+
+
+def _leer_recuerdo(p: Path) -> dict:
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in d.items() if isinstance(v, str)} if isinstance(d, dict) else {}
+
+
+_recuerdo_lock = threading.Lock()
+
+
+def _anotar_recuerdo(p: Path, cambios: dict[str, str]) -> None:
+    """Mezcla `cambios` en el recuerdo (cerrojo + escritura atómica: el panel y el coordinador no se pisan)."""
+    if not cambios:
+        return
+    with _recuerdo_lock:
+        d = _leer_recuerdo(p)
+        if all(d.get(k) == v for k, v in cambios.items()):
+            return
+        d.update(cambios)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(f".{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(d, indent=1, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(tmp, p)
+
+
+def _gh_issue(gh_bin: list[str], *args, stdin_text: str | None = None) -> str:
+    r = ejecutar(list(gh_bin) + list(args), cwd=LAB, timeout=120, stdin_text=stdin_text)
+    if r.returncode != 0:
+        raise RuntimeError(f"gh {' '.join(args[:3])} falló: {(r.stderr or r.stdout).strip()[:300]}")
+    return r.stdout
+
+
+def aplicar_agente(t: T.Tablero, it: dict, nuevo: str, agentes: dict, gh_bin: list[str], origen: str) -> None:
+    """Pasa la tarjeta a `nuevo`: etiqueta (quita las de los demás agentes), campo «### Agente» del cuerpo, campo
+    Agente del tablero y un comentario. Cada paso se puede repetir sin efectos raros. Actualiza `it` en memoria."""
+    repo, n = it["repo"], it["numero"]
+    etiqueta_de = {a: c["etiqueta"] for a, c in agentes.items() if isinstance(c, dict) and c.get("etiqueta")}
+    antes = T.agente_por_etiquetas(it.get("etiquetas"), etiqueta_de)
+    sobran = [e for a, e in etiqueta_de.items() if a != nuevo and e in it.get("etiquetas", [])]
+    if etiqueta_de[nuevo] not in it.get("etiquetas", []) or sobran:
+        args = ["issue", "edit", str(n), "--repo", repo, "--add-label", etiqueta_de[nuevo]]
+        for e in sobran:
+            args += ["--remove-label", e]
+        _gh_issue(gh_bin, *args)
+        it["etiquetas"] = [e for e in it.get("etiquetas", []) if e not in sobran and e != etiqueta_de[nuevo]] \
+            + [etiqueta_de[nuevo]]
+    cuerpo = it.get("cuerpo") or ""
+    nuevo_cuerpo = cambiar_campo_agente(cuerpo, nuevo)
+    if nuevo_cuerpo != cuerpo:
+        _gh_issue(gh_bin, "issue", "edit", str(n), "--repo", repo, "--body-file", "-", stdin_text=nuevo_cuerpo)
+        it["cuerpo"] = nuevo_cuerpo
+    if T.CAMPO_AGENTE in t.campos and it.get("agente_campo") != nuevo:
+        t.poner_opcion(it["item_id"], T.CAMPO_AGENTE, nuevo)
+        it["agente_campo"] = nuevo
+    _gh_issue(gh_bin, "issue", "comment", str(n), "--repo", repo, "--body-file", "-", stdin_text=(
+        f"**Agente cambiado: `{antes or 'sin agente'}` → `{nuevo}` 🤝**\n\nDesde {origen}. Ya están al día la etiqueta "
+        f"`{etiqueta_de[nuevo]}` y el campo Agente de la issue; cuando la tarjeta esté en To Do, la hará `{nuevo}`."))
+
+
+def sincronizar_agentes(t: T.Tablero, items: list[dict], agentes: dict, gh_bin: list[str], recuerdo: Path,
+                        repos: list[str] | None = None, avisar=None) -> dict:
+    """Campo Agente del tablero ↔ etiqueta `agent:*` (reglas en `T.plan_agentes`). Crea el campo o ajusta sus opciones
+    a los agentes activos; escribe solo lo que cambia. Solo toca tarjetas de `repos` (si se indica). Devuelve
+    {"escritas", "aplicadas": [n…], "revertidas": [n…], "errores": [texto…]}."""
+    avisar = avisar or log
+    activos = agentes_activos(agentes)
+    res = {"escritas": 0, "aplicadas": [], "revertidas": [], "errores": []}
+    if not activos:
+        return res
+    if t.asegurar_opciones(T.CAMPO_AGENTE, activos):
+        avisar(f"Campo {T.CAMPO_AGENTE} del tablero: opciones al día ({', '.join(activos)})")
+    etiqueta_de = {a: c["etiqueta"] for a, c in agentes.items() if isinstance(c, dict) and c.get("etiqueta")}
+    permitidos = {r.lower() for r in repos} if repos else None
+    propios = [it for it in items if permitidos is None or it["repo"].lower() in permitidos]
+    cambios: dict[str, str] = {}
+    for ac in T.plan_agentes(propios, etiqueta_de, activos, _leer_recuerdo(recuerdo)):
+        it, clave = ac["it"], T.clave_tarjeta(ac["it"])
+        try:
+            if ac["tipo"] == "aplicar":
+                aplicar_agente(t, it, ac["agente"], agentes, gh_bin, "el campo Agente del tablero")
+                res["aplicadas"].append(it["numero"])
+                avisar(f"#{it['numero']}: agente cambiado en el tablero a '{ac['agente']}' (etiqueta y cuerpo al día)")
+            else:
+                if ac["tipo"] in ("al_dia", "rellenar") and ac["agente"] and it.get("abierta", True) \
+                        and it.get("estado") in T.AGENTE_EDITABLE:
+                    # Gana la etiqueta: si el campo «### Agente» del cuerpo dice otro agente (Bloqueo por desajuste
+                    # al llegar a To Do), se pone al día. En Doing o después no se toca: lo lleva el coordinador.
+                    cuerpo = it.get("cuerpo") or ""
+                    if parsear_issue(cuerpo)["agente"] not in ("", ac["agente"]):
+                        nuevo = cambiar_campo_agente(cuerpo, ac["agente"])
+                        _gh_issue(gh_bin, "issue", "edit", str(it["numero"]), "--repo", it["repo"], "--body-file", "-",
+                                  stdin_text=nuevo)
+                        it["cuerpo"] = nuevo
+                        avisar(f"#{it['numero']}: campo Agente de la issue al día con la etiqueta ('{ac['agente']}')")
+            if ac["tipo"] in ("rellenar", "revertir"):
+                if ac["agente"]:
+                    t.poner_opcion(it["item_id"], T.CAMPO_AGENTE, ac["agente"])
+                else:
+                    t.poner_texto(it["item_id"], T.CAMPO_AGENTE, "")
+                it["agente_campo"] = ac["agente"]
+                res["escritas"] += 1
+                if ac["tipo"] == "revertir":
+                    _gh_issue(gh_bin, "issue", "comment", str(it["numero"]), "--repo", it["repo"], "--body-file", "-",
+                              stdin_text=f"**El agente sigue siendo `{ac['etiqueta'] or 'sin agente'}`** — he deshecho "
+                                         f"el cambio del campo Agente a `{ac['pedido']}`: {ac['motivo']}.")
+                    res["revertidas"].append(it["numero"])
+                    avisar(f"#{it['numero']}: cambio del campo Agente a '{ac['pedido']}' revertido ({ac['motivo']})")
+            cambios[clave] = ac["agente"]
+        except Exception as e:  # noqa: BLE001 — una tarjeta con problemas no frena a las demás
+            res["errores"].append(f"#{it['numero']}: {str(e)[:200]}")
+    _anotar_recuerdo(recuerdo, cambios)
+    return res
+
+
+def sincronizar_agentes_cfg(cfg: dict) -> dict | None:
+    """Sincronización del campo Agente desde el coordinador (modo tablero). Nunca interrumpe la cola."""
+    if cfg.get("fuente_cola") != "tablero" or not (cfg.get("tablero") or {}).get("numero"):
+        return None
+    tb = cfg["tablero"]
+    try:
+        t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), cfg["gh_bin"])
+        res = sincronizar_agentes(t, t.items(), cfg["agentes"], cfg["gh_bin"], ESTADO / RECUERDO_AGENTES,
+                                  cfg.get("repos") or [cfg["repo"]])
+    except Exception as e:  # noqa: BLE001
+        log(f"Campo {T.CAMPO_AGENTE}: no pude sincronizarlo ({str(e)[:200]})")
+        return None
+    for e in res["errores"]:
+        log(f"Campo {T.CAMPO_AGENTE}: {e}")
+    return res
 
 
 # --------------------------------------------------------------------------- lecciones del equipo
@@ -2746,6 +2892,9 @@ def liberar(con: sqlite3.Connection, repo: str, numero: int, previa) -> None:
 def procesar_cola(cfg: dict, detener_tras: str | None = None) -> dict:
     proc = Procesador(cfg, detener_tras)
     cola = proc.cola
+    # Antes de leer la cola: un cambio de agente hecho en el tablero (campo Agente) ya cambia la etiqueta, así la
+    # tarea la coge el agente nuevo sin Bloqueo por desajuste entre el campo y la etiqueta.
+    sincronizar_agentes_cfg(cfg)
     con = db()
     resumen: dict[str, list[int]] = {}
     candidatos: list[dict] = []
@@ -3207,6 +3356,44 @@ def cmd_reanudar(a) -> None:
           "Ejecuta `una-vez` o deja `vigilar` en marcha.")
 
 
+def cmd_agente(a) -> None:
+    """Cambia el agente de una tarjeta (lo usa el panel) o, sin agente, sincroniza el campo Agente de todo el tablero."""
+    cfg = cargar_config()
+    if cfg["fuente_cola"] != "tablero" or not (cfg.get("tablero") or {}).get("numero"):
+        sys.exit("El agente desde el tablero necesita el modo tablero (config.json → fuente_cola = tablero).")
+    tb = cfg["tablero"]
+    t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), cfg["gh_bin"])
+    recuerdo = ESTADO / RECUERDO_AGENTES
+    if a.issue is None:
+        res = sincronizar_agentes(t, t.items(), cfg["agentes"], cfg["gh_bin"], recuerdo, cfg.get("repos") or [cfg["repo"]],
+                                  avisar=print)
+        print(f"Campo {T.CAMPO_AGENTE}: {res['escritas']} tarjeta(s) actualizada(s), {len(res['aplicadas'])} cambio(s) "
+              f"aplicado(s), {len(res['revertidas'])} revertido(s)")
+        for e in res["errores"]:
+            print(f"  Aviso: {e}")
+        sys.exit(1 if res["errores"] else 0)
+    repo = a.repo or cfg["repo"]
+    if repo.lower() not in {r.lower() for r in (cfg.get("repos") or [cfg["repo"]])}:
+        sys.exit(f"{repo} no es un repo de este proyecto.")
+    activos = agentes_activos(cfg["agentes"])
+    if a.agente not in activos:
+        sys.exit(f"«{a.agente}» no es un agente activo de este proyecto (activos: {', '.join(activos) or 'ninguno'}).")
+    it = t.item_de_issue(repo, a.issue)
+    if not it:
+        sys.exit(f"#{a.issue} no está en el tablero.")
+    if not it["abierta"] or it["estado"] not in T.AGENTE_EDITABLE:
+        sys.exit(f"#{a.issue} está en {it['estado'] or 'sin estado'}{'' if it['abierta'] else ' (cerrada)'}: el agente solo "
+                 f"se cambia en {', '.join(T.AGENTE_EDITABLE)}.")
+    etiqueta_de = {n: c["etiqueta"] for n, c in cfg["agentes"].items() if isinstance(c, dict) and c.get("etiqueta")}
+    if T.agente_por_etiquetas(it["etiquetas"], etiqueta_de) == a.agente and it["agente_campo"] == a.agente:
+        print(f"#{a.issue} ya la tiene asignada {a.agente}.")
+        return
+    t.asegurar_opciones(T.CAMPO_AGENTE, activos)
+    aplicar_agente(t, it, a.agente, cfg["agentes"], cfg["gh_bin"], "el panel")
+    _anotar_recuerdo(recuerdo, {T.clave_tarjeta(it): it.get("agente_campo") or ""})
+    print(f"#{a.issue}: agente cambiado a {a.agente} (etiqueta, campo Agente de la issue y del tablero).")
+
+
 def cmd_leccion(a) -> None:
     """Convierte un fallo en una lección para que el agente no lo repita."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", a.agente):
@@ -3241,6 +3428,12 @@ def main() -> None:
     x.add_argument("texto")
     x.add_argument("--issue", type=int)
     x.set_defaults(f=cmd_leccion)
+    x = sp.add_parser("agente", help="Cambiar el agente de una tarjeta (Backlog, Planning o To Do) o, sin argumentos, "
+                                     "sincronizar el campo Agente del tablero con las etiquetas")
+    x.add_argument("issue", type=int, nargs="?")
+    x.add_argument("agente", nargs="?")
+    x.add_argument("--repo", help="Repo de la issue (por defecto, el principal del proyecto)")
+    x.set_defaults(f=cmd_agente)
     x = sp.add_parser("reanudar")
     x.add_argument("issue", type=int)
     x.add_argument("--desde", choices=PASOS[1:-1], help="Repetir desde este paso (por defecto, el siguiente pendiente).")

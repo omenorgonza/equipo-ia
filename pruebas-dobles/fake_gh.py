@@ -122,12 +122,24 @@ def checks(s, p):
             for n in s["workflows"].get(p["repo"], {}).get("checks", ["tests"])]
 
 
-def campos_proyecto():
+def campos_proyecto(p=None):
+    """Campos fijos de todos los proyectos más los creados con createProjectV2Field (p["campos_extra"], p. ej. Agente)."""
     return [{"id": "F_Status", "name": "Status", "dataType": "SINGLE_SELECT", "options": []},
             {"id": "F_Estado", "name": "Estado", "dataType": "SINGLE_SELECT", "options": [{"id": "O_" + o, "name": o} for o in ESTADO_OPC]},
             {"id": "F_Prioridad", "name": "Prioridad", "dataType": "SINGLE_SELECT", "options": [{"id": "O_" + o, "name": o} for o in PRIO_OPC]},
             {"id": "F_Bloqueo", "name": "Bloqueo", "dataType": "TEXT"},
-            {"id": "F_Siguiente", "name": "Siguiente", "dataType": "TEXT"}]
+            {"id": "F_Siguiente", "name": "Siguiente", "dataType": "TEXT"}] + list((p or {}).get("campos_extra", []))
+
+
+def nombre_campo(fid):
+    """F_<nombre> (fijos) o F_<nombre>~<proyecto> (extra) → <nombre>."""
+    return fid.split("_", 1)[1].split("~")[0]
+
+
+def opciones_de(q):
+    """Nombres de singleSelectOptions:[{name:"…", …}, …] escritos en la propia consulta."""
+    m = re.search(r"singleSelectOptions:\[(.*?)\]", q, re.S)
+    return [json.loads(x) for x in re.findall(r'name:("(?:[^"\\]|\\.)*")', m.group(1))] if m else []
 
 
 CAMPOS_TEXTO = ("Bloqueo", "Siguiente")
@@ -185,10 +197,27 @@ def graphql(s, a):
         p = s["projects"].get(str(v["numero"]))
         ok = p and p["owner"] == v["owner"]
         return {raiz: {"projectV2": {"id": f"PVT_{v['numero']}"} if ok else None}}
+    if "updateProjectV2Field(" in q:  # sustituye las opciones; los valores de opciones que desaparecen se vacían
+        p = s["projects"][v["f"].split("~")[1]]
+        f = next(x for x in p["campos_extra"] if x["id"] == v["f"])
+        f["options"] = [{"id": "O_" + o, "name": o} for o in opciones_de(q)]
+        for it in p["items"].values():
+            if it["fields"].get(f["name"]) not in (None, *opciones_de(q)):
+                it["fields"][f["name"]] = None
+        anotar_escritura(s, "campo:" + f["name"])
+        return {"updateProjectV2Field": {"projectV2Field": {"id": f["id"]}}}
     p = s["projects"][(v.get("id") or v.get("p")).split("_")[1]]
+    if "createProjectV2Field(" in q:
+        if any(x["name"] == v["n"] for x in campos_proyecto(p)):
+            print(f"GraphQL: Name has already been taken ({v['n']})", file=sys.stderr); sys.exit(1)
+        f = {"id": f"F_{v['n']}~{v['p'].split('_')[1]}", "name": v["n"], "dataType": "SINGLE_SELECT",
+             "options": [{"id": "O_" + o, "name": o} for o in opciones_de(q)]}
+        p.setdefault("campos_extra", []).append(f)
+        anotar_escritura(s, "campo:" + f["name"])
+        return {"createProjectV2Field": {"projectV2Field": {"id": f["id"]}}}
     if "fields(first" in q:
         return {"node": {"title": p["title"], "url": p["url"], "public": False,
-                         "fields": {"nodes": campos_proyecto()}, "views": {"nodes": [vista_json(x) for x in p.get("views", [])]}}}
+                         "fields": {"nodes": campos_proyecto(p)}, "views": {"nodes": [vista_json(x) for x in p.get("views", [])]}}}
     if "items(first" in q:
         nodes = []
         for iid, it in p["items"].items():
@@ -203,7 +232,7 @@ def graphql(s, a):
             nodes.append({"id": iid, "fieldValues": {"nodes": fvs}, "content": contenido})
         return {"node": {"items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}
     if "updateProjectV2ItemFieldValue" in q:
-        campo = v["f"].split("_", 1)[1]
+        campo = nombre_campo(v["f"])
         valor = v["o"].split("_", 1)[1] if "o" in v else v["t"]
         if campo == "Estado" and os.environ.get("FAKE_GH_FALLA_MOVER") == valor:
             print("HTTP 502: fallo simulado al escribir Estado", file=sys.stderr)
@@ -212,8 +241,8 @@ def graphql(s, a):
         anotar_escritura(s, campo)
         return {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": v["i"]}}}
     if "clearProjectV2ItemFieldValue" in q:
-        p["items"][v["i"]]["fields"][v["f"].split("_", 1)[1]] = None
-        anotar_escritura(s, v["f"].split("_", 1)[1])
+        p["items"][v["i"]]["fields"][nombre_campo(v["f"])] = None
+        anotar_escritura(s, nombre_campo(v["f"]))
         return {"clearProjectV2ItemFieldValue": {"projectV2Item": {"id": v["i"]}}}
     if "addProjectV2ItemById" in q:
         k = s["issue_ids"][v["c"]]

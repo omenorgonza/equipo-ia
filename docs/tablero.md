@@ -41,11 +41,33 @@ Un único sitio por transición:
 - **Prioridad**: P0…P3 (P2 normal por defecto en `tablero.py nueva`).
 - **Bloqueo**: texto con la causa y cómo seguir; vacío = sin bloqueo.
 - **Siguiente**: texto con el siguiente paso recomendado (ver [Guía de uso](guia-uso.md#qué-hago-ahora)).
+- **Agente**: single select con una opción por agente activo; refleja la etiqueta `agent:*` y sirve para
+  cambiarla (ver [Cambiar el agente de una tarea](#cambiar-el-agente-de-una-tarea)).
+
+## Cambiar el agente de una tarea
+
+La etiqueta `agent:*` de la issue manda; el campo **Agente** del tablero la refleja en cada tarjeta (también en
+el móvil) y se rellena solo. Para pasar una tarea, p. ej., de `local` a `claude` mientras está en **Backlog,
+Planning o To Do**, hay tres maneras:
+
+1. **Tablero** (web o móvil): cambia el campo Agente de la tarjeta. En el siguiente ciclo del equipo (o del
+   panel, si el equipo está parado) se cambian la etiqueta y el campo «Agente» del cuerpo, con un comentario.
+2. **Panel**: el desplegable de agente de la tarjeta ([Agente de cada tarjeta](panel.md#agente-de-cada-tarjeta)),
+   o en la terminal `python3 equipo.py <proyecto> agente N claude`.
+3. **Etiqueta**: cambia `agent:local` por `agent:claude` en la issue. Gana la etiqueta: el campo del tablero se
+   actualiza solo y, en Backlog, Planning o To Do, también el campo «Agente» del cuerpo.
+
+Así, al pasar a To Do la tarea la hace el agente nuevo sin Bloqueo por desajuste entre el campo y la etiqueta.
+Un cambio del campo en **Doing** o después, o a un agente **inactivo**, se deshace con un comentario que explica
+por qué. Si cambian a la vez el campo y la etiqueta, gana la etiqueta. Las opciones del campo son los agentes
+activos: `python3 equipo.py <proyecto> agente` (sin argumentos) o `preparar` crean el campo o ajustan sus opciones
+y sincronizan todas las tarjetas; el coordinador lo hace también al empezar cada ciclo, y solo escribe lo que
+cambia. Para saber quién cambió qué, guarda el valor sincronizado en `proyectos/<p>/estado/agentes-tablero.json`.
 
 ## Plantilla del tablero
 
 Los tableros nuevos se **copian del tablero de ensayo** (vistas «Tablero» y «Planning», campos Estado,
-Prioridad, Bloqueo y Siguiente, y workflows desactivados). Para otra plantilla: `plantilla_tablero` en
+Prioridad, Bloqueo y Siguiente, y workflows desactivados); `crear` añade el campo Agente con los agentes activos. Para otra plantilla: `plantilla_tablero` en
 `equipo.json`. Un tablero creado sin plantilla y aún vacío se sustituye con
 `python3 equipo.py <proyecto> tablero rehacer` (el antiguo no se borra; elimínalo tú en Settings → Delete project).
 
@@ -80,7 +102,7 @@ python3 tablero.py nueva "Añadir media de puntos" --agente local \
   --prueba unit --prioridad P2 --todo
 ```
 
-Sin `--todo` queda en Backlog. Si faltan agente, archivos, criterios o prueba, se crea en Backlog con los
+`--agente` admite cualquier agente activo del proyecto. Sin `--todo` queda en Backlog. Si faltan agente, archivos, criterios o prueba, se crea en Backlog con los
 huecos marcados (y `--todo` se rechaza). `--dep N` añade una dependencia (sección y relación «Blocked by»: ver
 [Guía de uso](guia-uso.md#dependencias)). En la web: New issue → «Tarea para agente», añadirla al proyecto
 Equipo IA y moverla a To Do. Desde el panel: [Nueva tarea](panel.md#nueva-tarea).

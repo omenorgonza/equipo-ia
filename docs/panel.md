@@ -45,9 +45,19 @@ aplica en el ciclo siguiente. Detalles en
 
 Si el proyecto tiene `cadena_escalado`, la casilla dice «Escalar por la cadena (local → local-plus → claude)»; la
 cadena se cambia en el `config.json` ([Cadena de escalado](agentes-y-lecciones.md#cadena-de-escalado)). El selector
-de agente de «Nueva tarea» solo ofrece `claude` y `local` (los que admite `tablero.py nueva`), y solo si están
-activos en el proyecto. Para una tarea de otro motor (`codex`, `local-plus`…), créala como `claude` y cámbiale
-después la etiqueta `agent:` y el campo «Agente» del cuerpo de la issue.
+de agente de «Nueva tarea» ofrece los agentes activos del proyecto (`claude`, `local`, `codex`, `local-plus`…), los
+mismos que admite `tablero.py nueva --agente`.
+
+## Agente de cada tarjeta
+
+La lista de tareas de cada proyecto (Backlog, Planning, To Do, Doing y Review) muestra el agente asignado según
+su etiqueta `agent:*`. En **Backlog, Planning y To Do** es un desplegable con los agentes activos: al elegir otro,
+el panel ejecuta `coordinador.py agente N <agente>`, que cambia la etiqueta, el campo «Agente» del cuerpo de la
+issue y el del tablero, y deja un comentario. En Doing o después es solo texto, y un agente inactivo no aparece
+como opción (el panel y el coordinador lo rechazan). API: `POST /api/proyecto/<nombre>/agente` con
+`{"numero": N, "agente": "claude"}` y la cabecera `X-Token`. Con el equipo parado, el panel también aplica los
+cambios hechos en el campo Agente del tablero. Más en
+[Cambiar el agente de una tarea](tablero.md#cambiar-el-agente-de-una-tarea).
 
 ## Guardar TABLERO_TOKEN
 

@@ -135,6 +135,10 @@
   .tarj .sig-t { width: 100%; color: var(--muted); font-size: 12.5px; padding-left: 2px; }
   /* Dependencias pendientes (sección «Dependencias» + «Blocked by» de GitHub) de las tareas en To Do. */
   .tarj .espera { width: 100%; color: var(--muted); font-size: 12.5px; padding-left: 2px; }
+  /* Agente asignado de cada tarjeta: texto o, en Backlog / Planning / To Do, desplegable con los agentes activos. */
+  .tarj .ag { color: var(--muted); font-size: 12.5px; display: inline-flex; align-items: center; gap: 4px; }
+  .tarj .ag select { font: inherit; font-size: 12.5px; padding: 1px 4px; border: 1px solid var(--line); border-radius: 6px;
+                     background: var(--bg); color: var(--ink); }
   @media (prefers-color-scheme: dark) {
     .prog.atasco, .at.atasco { background: #3a2e14; } .prog.atasco .aviso { color: #f3cf7a; }
   }
@@ -313,7 +317,7 @@ function pintar() {
   document.getElementById("proyectos").innerHTML = ps.map(p => {
     const altas = p.atencion.filter(a => a.nivel === "alta").length;
     const rd = (p.repos[0] || {}).readme || {};
-    const activas = ["Testing / Review", "Doing", "To Do", "Planning"].flatMap(e => (p.tarjetas[e] || []).map(t => ({...t, e})));
+    const activas = ["Testing / Review", "Doing", "To Do", "Planning", "Backlog"].flatMap(e => (p.tarjetas[e] || []).map(t => ({...t, e})));
     return `<article class="card c-${esc(p.color)} ${altas ? "foco" : ""}">
       <div class="top"><h3>${esc(p.nombre)}</h3>
         <span class="pill ${p.activo ? "on" : "off"}">${p.activo ? "Equipo trabajando" : "Equipo parado"}</span></div>
@@ -335,10 +339,10 @@ function pintar() {
           <button class="mini" onclick="verProgreso('${p.nombre}', ${pg.numero})">Ver progreso</button>
           ${pg.ultima_linea ? `<span class="ult" title="${esc(pg.ultima_linea)}">${esc(pg.ultima_linea)}</span>` : ""}
         </div>`).join("")}</div>` : ""}
-      ${activas.length ? `<details data-p="${esc(p.nombre)}" ${abiertos.has(p.nombre) ? "open" : ""}><summary>${activas.length} tarea(s) en curso, pendientes o en Planning</summary>
+      ${activas.length ? `<details data-p="${esc(p.nombre)}" ${abiertos.has(p.nombre) ? "open" : ""}><summary>${activas.length} tarea(s) en curso, pendientes, en Planning o en Backlog</summary>
         ${activas.map(t => `<div class="tarj"><span>${esc(CORTO[t.e] || t.e)}</span>
           <a href="${esc(t.pr || t.url)}" target="_blank" rel="noopener">#${t.numero} ${esc(t.titulo)}</a>
-          <span class="pr">${esc((t.prioridad || "").slice(0,2))} ${esc(t.agente || "")}</span>
+          <span class="pr">${esc((t.prioridad || "").slice(0,2))}</span> ${htmlAgente(p, t)}
           ${(t.espera || []).length ? `<span class="espera">⏳ espera a ${t.espera.map(d =>
             `<a href="${esc(d.url)}" target="_blank" rel="noopener" title="${esc(d.estado || "fuera del tablero")}">${esc(d.texto)}</a>`).join(", ")}</span>` : ""}
           ${t.siguiente ? `<span class="sig-t">${esc(t.siguiente)}</span>` : ""}</div>`).join("")}</details>` : ""}
@@ -353,6 +357,28 @@ function pintar() {
         <span class="paleta" title="Color del proyecto">${PALETA.map(c => `<button class="c-${c} ${c === p.color ? "sel" : ""}"
           title="${c}" aria-label="Color ${c}" onclick="cambiarColor('${p.nombre}','${c}')"></button>`).join("")}</span>
       </div></article>`; }).join("") || `<div class="vacio">Aún no hay proyectos. Usa «Nuevo proyecto» o «Añadir proyecto existente».</div>`;
+}
+
+// Agente asignado de una tarjeta. Solo en Backlog, Planning y To Do (agente_editable) es un desplegable con los
+// agentes activos del proyecto; en Doing o después, texto. Cambiarlo cambia la etiqueta agent:* y el campo Agente.
+function htmlAgente(p, t) {
+  const actual = t.agente || "", lista = p.agentes_tablero || [];
+  if (!t.agente_editable) return `<span class="ag" title="Agente asignado">${esc(actual || "sin agente")}</span>`;
+  const sinValido = lista.includes(actual) ? "" : "selected";
+  const aviso = actual ? actual + " (inactivo)" : "sin agente";
+  const opciones = lista.map(a => `<option value="${esc(a)}" ${a === actual ? "selected" : ""}>${esc(a)}</option>`).join("");
+  return `<label class="ag" title="Agente asignado: al cambiarlo se cambian la etiqueta y el campo Agente de la issue">
+          <select aria-label="Agente de #${t.numero}" onchange="cambiarAgente('${esc(p.nombre)}', ${t.numero}, '${esc(t.repo)}', this)"><option value="" disabled ${sinValido}>${esc(aviso)}</option>${opciones}</select></label>`;
+}
+async function cambiarAgente(p, n, repo, sel) {
+  const agente = sel.value;
+  if (!agente) return;
+  sel.disabled = true;
+  let r;
+  try { r = await post(`/api/proyecto/${p}/agente`, {numero: n, agente, repo}); }
+  catch (e) { r = {ok: false, error: "No se pudo contactar con el panel"}; }
+  toast(r.ok ? r.mensaje : (r.error || "No se pudo cambiar el agente"));
+  cargar(true);
 }
 
 // Escalado automático al senior (escalar_fallos / fallos_para_escalar del config.json del proyecto). Lo que se ha

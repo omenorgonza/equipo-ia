@@ -626,7 +626,7 @@ def turnos():  # invocaciones de opencode (fake_agente --file) en esta issue
 PY
 nueva_motor() {  # nueva_motor <nombre> <agente> <marcas del objetivo> → número de la issue
   local agente=$2 n
-  [ "$2" = codex ] || [ "$2" = local-plus ] && agente=claude   # tablero.py nueva solo admite claude y local
+  [ "$2" = codex ] || [ "$2" = local-plus ] && agente=claude   # se crea como claude y se cambia la etiqueta (y el cuerpo) a mano
   n=$(python3 equipo.py demo tablero nueva "Motor $1" --agente "$agente" \
     --objetivo "Crea el archivo docs/$1.md con un título. $3" \
     --archivo "docs/$1.md" --criterio "existe docs/$1.md" --prueba ci --todo | sed -n 's/^#\([0-9]*\) creada.*/\1/p')
@@ -1636,6 +1636,185 @@ for r in rotos:
     print("      roto:", r)
 check(total > 0 and not rotos, f"enlaces relativos entre README.md y docs/*.md ({total} revisados, {len(rotos)} rotos)")
 sys.exit(1 if fallos else 0)
+PY
+
+echo "== 5f. Agente asignado: campo «Agente» del tablero ↔ etiqueta agent:*, y desplegable del panel"
+mkdir -p "$S.aglib"
+cat > "$S.aglib/aglib.py" <<'PY'
+import json, os, sqlite3
+ST = os.environ["FAKE_GH_STATE"]
+def estado(): return json.load(open(ST))
+def guardar(s): json.dump(s, open(ST, "w"), indent=1)
+def proyecto(s): return [p for p in s["projects"].values() if p["title"] == "Equipo IA · demo"][0]
+def tarjeta(s, n):
+    return next(it for it in proyecto(s)["items"].values() if it.get("issue") == f"oscar/demo-app#{n}")
+def issue(s, n): return s["issues"][f"oscar/demo-app#{n}"]
+def poner(n, **campos):  # simula a Óscar cambiando campos de la tarjeta en el tablero (web o móvil)
+    s = estado(); tarjeta(s, n)["fields"].update(campos); guardar(s)
+def escrituras(): return estado().get("escrituras", {}).get("Agente", 0)
+PY
+nueva_ag() {  # nueva_ag <nombre> <agente> → número (en Backlog)
+  python3 equipo.py demo tablero nueva "Agente $1" --agente "$2" --objetivo "Crea docs/agente-$1.md." \
+    --archivo "docs/agente-$1.md" --criterio "existe docs/agente-$1.md" --prueba ci | sed -n 's/^#\([0-9]*\) creada.*/\1/p'
+}
+NA=$(nueva_ag planning local); NB=$(nueva_ag etiqueta claude); NC=$(nueva_ag inactivo local); NDO=$(nueva_ag doing local)
+NA=$NA NC=$NC NDO=$NDO PYTHONPATH="$S.aglib" python3 - <<'PY' || mal "no pude preparar las tarjetas del ensayo de agente"
+import os
+from aglib import *
+poner(int(os.environ["NA"]), Estado="Planning"); poner(int(os.environ["NC"]), Estado="Planning")
+poner(int(os.environ["NDO"]), Estado="Doing")
+PY
+python3 equipo.py demo agente > "$S.ag1.log" 2>&1 || true
+E1=$(PYTHONPATH="$S.aglib" python3 -c "from aglib import *; print(escrituras())")
+PYTHONPATH="$S.aglib" EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "campo Agente rellenado en todas las tarjetas según su etiqueta (opciones: solo agentes activos)" || { cat "$S.ag1.log"; mal "campo Agente sin rellenar"; }
+import equipo as E, tablero_lib as T
+from aglib import *
+cfg = E.cfg_proyecto("demo")
+activos = E.C.agentes_activos(cfg["agentes"])
+etiqueta_de = {a: c["etiqueta"] for a, c in cfg["agentes"].items() if c.get("etiqueta")}
+assert "codex" not in activos and {"claude", "local"} <= set(activos), activos
+s = estado(); p = proyecto(s)
+campo = next(f for f in p.get("campos_extra", []) if f["name"] == "Agente")
+assert [o["name"] for o in campo["options"]] == activos, campo
+vistas = 0
+for it in p["items"].values():
+    i = s["issues"].get(it.get("issue", ""))
+    if not i:
+        continue
+    esperado = T.agente_por_etiquetas(i["labels"], etiqueta_de)
+    esperado = esperado if esperado in activos else None
+    assert (it["fields"].get("Agente") or None) == esperado, (i["number"], i["labels"], it["fields"])
+    vistas += 1
+assert vistas >= 10, vistas
+PY
+python3 equipo.py demo agente > "$S.ag2.log" 2>&1 || true
+[ "$(PYTHONPATH="$S.aglib" python3 -c "from aglib import *; print(escrituras())")" = "$E1" ] \
+  && grep -q "0 tarjeta(s) actualizada(s), 0 cambio(s) aplicado(s), 0 revertido(s)" "$S.ag2.log" \
+  && ok "sin cambios no se vuelve a escribir el campo Agente" || { cat "$S.ag2.log"; mal "escrituras repetidas del campo Agente"; }
+NA=$NA NB=$NB NC=$NC NDO=$NDO PYTHONPATH="$S.aglib" python3 - <<'PY' || mal "no pude simular los cambios en el tablero"
+import os
+from aglib import *
+poner(int(os.environ["NA"]), Agente="claude")       # Planning: local → claude desde el tablero
+poner(int(os.environ["NC"]), Agente="codex")         # agente inactivo (opción antigua que aún se ve en el tablero)
+poner(int(os.environ["NDO"]), Agente="claude")       # Doing: no se puede cambiar
+s = estado(); issue(s, int(os.environ["NB"]))["labels"] = ["agent:local"]; guardar(s)   # etiqueta cambiada a mano
+PY
+python3 equipo.py demo agente > "$S.ag3.log" 2>&1 || true
+NA=$NA NB=$NB NC=$NC NDO=$NDO PYTHONPATH="$S.aglib" python3 - "$S.ag3.log" <<'PY' && ok "tablero: cambio en Planning aplicado; etiqueta a mano gana; Doing e inactivo revertidos con comentario" || { cat "$S.ag3.log"; mal "sincronización del campo Agente"; }
+import os, sys
+from aglib import *
+na, nb, nc, nd = (int(os.environ[k]) for k in ("NA", "NB", "NC", "NDO"))
+s = estado()
+a = issue(s, na)
+assert a["labels"] == ["agent:claude"], a["labels"]
+assert "### Agente\n\nclaude\n" in a["body"] and "### Agente\n\nlocal" not in a["body"], a["body"]
+assert tarjeta(s, na)["fields"]["Agente"] == "claude" and tarjeta(s, na)["fields"]["Estado"] == "Planning"
+assert len(a["comments"]) == 1 and "Agente cambiado: `local` → `claude`" in a["comments"][0], a["comments"]
+b = issue(s, nb)
+assert tarjeta(s, nb)["fields"]["Agente"] == "local" and b["labels"] == ["agent:local"], (b["labels"], tarjeta(s, nb))
+assert "### Agente\n\nlocal\n" in b["body"] and not b["comments"], (b["body"], b["comments"])
+for n, texto in ((nc, "`codex` no es un agente activo"), (nd, "la tarjeta está en Doing")):
+    i = issue(s, n)
+    assert tarjeta(s, n)["fields"]["Agente"] == "local" and i["labels"] == ["agent:local"], (n, i["labels"], tarjeta(s, n))
+    assert "### Agente\n\nlocal\n" in i["body"], i["body"]
+    assert len(i["comments"]) == 1 and "El agente sigue siendo `local`" in i["comments"][0] and texto in i["comments"][0], i["comments"]
+t = open(sys.argv[1], encoding="utf-8").read()
+assert "1 cambio(s) aplicado(s), 2 revertido(s)" in t, t
+PY
+python3 equipo.py demo agente > "$S.ag4.log" 2>&1 || true
+grep -q "0 cambio(s) aplicado(s), 0 revertido(s)" "$S.ag4.log" && ok "tras aplicar o revertir, el ciclo siguiente no repite nada" \
+  || { cat "$S.ag4.log"; mal "el cambio del campo Agente se repite"; }
+NA=$NA PYTHONPATH="$S.aglib" python3 - <<'PY' || mal "no pude pasar #$NA a To Do"
+import os, sqlite3
+from aglib import *
+n = int(os.environ["NA"])
+s = estado()
+for it in proyecto(s)["items"].values():  # #NA sola en la cola: nada más ocupa el turno de claude
+    if it["fields"].get("Estado") == "To Do" and not it["fields"].get("Bloqueo") and it.get("issue") != f"oscar/demo-app#{n}":
+        it["fields"]["Estado"] = "Backlog"
+tarjeta(s, n)["fields"].update({"Estado": "To Do", "Prioridad": "P0 urgente"})
+guardar(s)
+con = sqlite3.connect("proyectos/demo/estado/registro.db")
+con.execute("UPDATE tareas SET estado='bloqueada' WHERE estado='en_curso' AND issue<>?", (n,))
+con.commit()
+PY
+python3 equipo.py demo una-vez --detener-tras worktree > "$S.ag5.log" 2>&1 || true
+NA=$NA PYTHONPATH="$S.aglib" python3 - "$S.ag5.log" <<'PY' && ok "al pasar a To Do la hace claude sin Bloqueo por desajuste" || { cat "$S.ag5.log"; mal "To Do tras cambiar el agente en el tablero"; }
+import os, sqlite3, sys
+from aglib import *
+n = int(os.environ["NA"])
+f = sqlite3.connect("proyectos/demo/estado/registro.db").execute(
+    "SELECT agente, estado, causa, rama FROM tareas WHERE issue=?", (n,)).fetchone()
+assert f and f[0] == "claude" and f[1] != "bloqueada" and not f[2] and f[3] == f"agente/claude/issue-{n}", f
+campos = tarjeta(estado(), n)["fields"]
+assert not campos.get("Bloqueo") and campos["Estado"] == "Doing", campos
+assert "no coincide" not in open(sys.argv[1], encoding="utf-8").read()
+PY
+
+PUERTO=8793
+python3 equipo.py panel --puerto $PUERTO --no-abrir > "$S.panel-ag.log" 2>&1 &
+PANEL=$!
+for _ in $(seq 1 60); do curl -sf "http://127.0.0.1:$PUERTO/" | grep -q "Equipo IA" && break; sleep 0.5; done
+TOKEN=$(curl -sf "http://127.0.0.1:$PUERTO/" | sed -n 's/.*const TOKEN = "\([^"]*\)".*/\1/p')
+NB=$NB NC=$NC NDO=$NDO PUERTO=$PUERTO TOKEN=$TOKEN PYTHONPATH="$S.aglib" python3 - <<'PY' && ok "panel: agente en cada tarjeta, desplegable solo en Backlog/Planning/To Do; Doing e inactivo rechazados" || mal "panel: agente de las tarjetas"
+import json, os, urllib.error, urllib.request
+from aglib import *
+base = f"http://127.0.0.1:{os.environ['PUERTO']}"
+nb, nc, nd = (int(os.environ[k]) for k in ("NB", "NC", "NDO"))
+def demo():
+    return {p["nombre"]: p for p in json.load(urllib.request.urlopen(base + "/api/estado?refrescar=1"))["proyectos"]}["demo"]
+def cambiar(cuerpo):
+    req = urllib.request.Request(base + "/api/proyecto/demo/agente", data=json.dumps(cuerpo).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Token": os.environ["TOKEN"]})
+    try:
+        r = urllib.request.urlopen(req); return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, json.load(e)
+d = demo()
+assert "codex" not in d["agentes_tablero"] and {"claude", "local"} <= set(d["agentes_tablero"]), d["agentes_tablero"]
+for col, ts in d["tarjetas"].items():
+    for t in ts:
+        assert "agente" in t and t["agente_editable"] == (col in ("Backlog", "Planning", "To Do")), (col, t)
+ts = {t["numero"]: t for g in d["tarjetas"].values() for t in g}
+assert ts[nb]["agente"] == "local" and ts[nd]["agente"] == "local" and not ts[nd]["agente_editable"], (ts[nb], ts[nd])
+codigo, r = cambiar({"numero": nb, "agente": "claude"})                     # Backlog: local → claude
+assert codigo == 200 and r["ok"], (codigo, r)
+s = estado(); i = issue(s, nb)
+assert i["labels"] == ["agent:claude"] and "### Agente\n\nclaude\n" in i["body"], (i["labels"], i["body"])
+assert tarjeta(s, nb)["fields"]["Agente"] == "claude" and any("desde el panel" in c.lower() for c in i["comments"]), i["comments"]
+assert demo()["tarjetas"]["Backlog"] and {t["numero"]: t for t in demo()["tarjetas"]["Backlog"]}[nb]["agente"] == "claude"
+antes = json.dumps(issue(estado(), nd))
+codigo, r = cambiar({"numero": nd, "agente": "claude"})                     # Doing: no
+assert codigo == 400 and not r["ok"] and "Doing" in r["error"], (codigo, r)
+codigo, r = cambiar({"numero": nc, "agente": "codex"})                      # inactivo: no
+assert codigo == 400 and not r["ok"] and "codex" in r["error"], (codigo, r)
+assert json.dumps(issue(estado(), nd)) == antes and issue(estado(), nc)["labels"] == ["agent:local"]
+codigo, r = cambiar({"numero": "x", "agente": "claude"})
+assert codigo == 400, (codigo, r)
+PY
+kill $PANEL 2>/dev/null || true
+python3 - <<'PY' && ok "HTML del desplegable de agente bien anidado (label/select/option/span)" || mal "HTML del desplegable de agente mal anidado"
+import re
+from html.parser import HTMLParser
+TAGS = ("div", "label", "select", "option", "span")
+class P(HTMLParser):
+    def __init__(s): super().__init__(); s.pila = []; s.vistos = set()
+    def handle_starttag(s, t, a):
+        s.vistos.add(t)
+        if t in TAGS: s.pila.append(t)
+    def handle_endtag(s, t):
+        if t in TAGS:
+            assert s.pila and s.pila.pop() == t, (t, s.getpos())
+h = open("panel.html", encoding="utf-8").read()
+cuerpo = re.search(r"function htmlAgente\(p, t\) \{(.*?)\n\}", h, re.S).group(1)
+trozos = [re.search(r"map\(a => `(.*?)`\)", cuerpo, re.S).group(1)] + re.findall(r"return `(.*?)`;", cuerpo, re.S)
+assert len(trozos) == 3, trozos
+p = P()
+for trozo in trozos:
+    p.feed(re.sub(r"\$\{[^}]*\}", "", trozo))
+assert not p.pila, p.pila
+assert {"label", "select", "option", "span"} <= p.vistos, p.vistos
+assert "${htmlAgente(p, t)}" in h and '"Backlog"].flatMap' in h
 PY
 
 echo "== 6. Compilación de todo el código"
