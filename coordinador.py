@@ -3058,9 +3058,12 @@ def cmd_probar(a) -> None:
     # OpenCode trabaja en la raíz git del directorio actual, no en el propio directorio: sin un repo propio, la
     # carpeta de la prueba (dentro del laboratorio) haría que el archivo cayera en la raíz del laboratorio.
     rg = ejecutar(cfg["git_bin"] + ["init", "-q", str(carpeta)], cwd=carpeta, timeout=60)
-    if rg.returncode != 0:
-        print(f"⚠ no pude crear un repo git en la carpeta de la prueba ({(rg.stderr or '').strip()[:160]}); "
-              "OpenCode podría escribir en la raíz git del laboratorio")
+    if rg.returncode != 0 or not (carpeta / ".git").exists():
+        # Sin repo propio, OpenCode escribiría en la raíz del laboratorio: mejor no lanzar el agente.
+        sys.exit(f"FALLO: no pude crear el repo git aislado de la prueba en {carpeta} "
+                 f"({((rg.stderr or rg.stdout or '').strip() or f'código {rg.returncode}')[:200]}).\n"
+                 f"Comprueba git_bin en el config.json ({' '.join(cfg['git_bin'])}) y vuelve a lanzar `probar`; "
+                 "el agente no se ha ejecutado.")
     archivo = f"prueba-{nombre}.txt"
     prompt = f"Crea el archivo {archivo} en el directorio actual con exactamente el texto LISTO (sin nada más). No hagas nada más."
     antes = ollama_ps(cfg) if proveedor == "ollama" else []

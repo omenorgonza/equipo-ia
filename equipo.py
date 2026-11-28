@@ -403,13 +403,31 @@ def colores_etiquetas(agentes: dict) -> dict[str, str]:
     return colores
 
 
-def preparar_github(repo: str, tablero: dict, simulado: bool, agentes: dict | None = None) -> list[str]:
+def crear_etiquetas(repo: str, colores: dict) -> list[str]:
+    """`gh label create --force` de cada etiqueta. Devuelve las que GitHub rechazó, «etiqueta: motivo»."""
+    fallidas = []
+    for etq, color in colores.items():
+        r = C.ejecutar(gh_bin() + ["label", "create", etq, "--repo", repo, "--color", color, "--force"],
+                       cwd=LAB, timeout=300)
+        if r.returncode != 0:
+            motivo = (r.stderr or r.stdout or "").strip().splitlines()
+            fallidas.append(f"{etq}: {(motivo[-1] if motivo else f'código {r.returncode}')[:200]}")
+    return fallidas
+
+
+def preparar_github(repo: str, tablero: dict, simulado: bool, agentes: dict | None = None,
+                    fallidas: list | None = None) -> list[str]:
     """Etiquetas, variables, Dependabot y comprobación del secreto. Devuelve pendientes para Óscar.
-    `agentes`: los del proyecto (equipo.json con su config.json encima); sin ellos, los de equipo.json."""
+    `agentes`: los del proyecto (equipo.json con su config.json encima); sin ellos, los de equipo.json.
+    `fallidas`: si se pasa, se le añaden las etiquetas que GitHub rechazó (permisos, red…)."""
     pendientes = []
     colores = colores_etiquetas(equipo_cfg().get("agentes") if agentes is None else agentes)
-    for etq, color in colores.items():
-        gh("label", "create", etq, "--repo", repo, "--color", color, "--force", comprobar=False)
+    malas = crear_etiquetas(repo, colores)
+    if malas:
+        pendientes.append(f"Crear a mano en {repo} las etiquetas que GitHub rechazó (o repetir `preparar` con "
+                          f"permisos de escritura): {'; '.join(malas)}")
+        if fallidas is not None:
+            fallidas += malas
     if simulado:
         return pendientes
     gh("api", "-X", "PUT", f"repos/{repo}/vulnerability-alerts", comprobar=False)
@@ -568,10 +586,19 @@ def preparar_proyecto(nombre: str, log=print) -> list[str]:
         raise RuntimeError(f"El proyecto {nombre} no tiene tablero en su config.json")
     repos = [r for r in (cfg.get("repos") or [cfg.get("repo")]) if r]
     pendientes: list[str] = []
+    con_error: list[str] = []
     for repo in repos:
-        pendientes += preparar_github(repo, tablero, bool(cfg.get("simular_actions")), cfg.get("agentes"))
-        log(f"{repo}: etiquetas al día ({', '.join(e for e in colores_etiquetas(cfg.get('agentes')) if e.startswith('agent:'))})")
+        fallidas: list[str] = []
+        pendientes += preparar_github(repo, tablero, bool(cfg.get("simular_actions")), cfg.get("agentes"), fallidas)
+        if fallidas:
+            con_error.append(repo)
+            log(f"⚠ {repo}: GitHub rechazó {len(fallidas)} etiqueta(s):\n    " + "\n    ".join(fallidas))
+        else:
+            log(f"{repo}: etiquetas al día ({', '.join(e for e in colores_etiquetas(cfg.get('agentes')) if e.startswith('agent:'))})")
     log("Pendiente para Óscar:\n  - " + "\n  - ".join(pendientes) if pendientes else "Nada pendiente.")
+    if con_error:
+        raise RuntimeError(f"preparar: faltan etiquetas en {', '.join(con_error)} (detalles arriba). Sin la etiqueta "
+                           "de un agente, sus tareas no se pueden asignar: revisa los permisos del token de gh")
     return pendientes
 
 

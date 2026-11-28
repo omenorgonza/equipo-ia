@@ -367,6 +367,10 @@ elif a[:2] == ["secret", "set"]:
     # Solo la huella: el ensayo comprueba que llegó el valor correcto sin que el valor toque el disco.
     s.setdefault("secretos_sha", {})[f"{repo}:{a[2]}"] = hashlib.sha256(valor.encode()).hexdigest()
 elif a[:2] == ["label", "create"]:  # el ensayo comprueba qué etiquetas existen en cada repo
+    # FAKE_GH_FALLA_ETIQUETA=<etiqueta>: GitHub la rechaza (p. ej. un token sin permiso de escritura)
+    if os.environ.get("FAKE_GH_FALLA_ETIQUETA") == a[2]:
+        sys.stderr.write("HTTP 403: Resource not accessible by personal access token\n")
+        sys.exit(1)
     etiquetas = s.setdefault("labels", {}).setdefault(repo_de(a), [])
     if a[2] not in etiquetas:
         etiquetas.append(a[2])

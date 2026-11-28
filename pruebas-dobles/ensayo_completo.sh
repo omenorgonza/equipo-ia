@@ -441,12 +441,12 @@ assert "Historial de intentos" in issue["comments"][-1] and "Intento 3 (claude" 
 assert pendientes("local") == 2 and pendientes("claude") == 0, (pendientes("local"), pendientes("claude"))
 PY
 
-config_demo escalar_fallos false
+config_demo escalar_fallos '"false"'  # como texto, tal como lo escribiría alguien a mano en el config.json
 N=$(nueva_fallo fallo-sin-escalar local fuera1)
 python3 equipo.py demo una-vez > "$S.fallo-sin.log" 2>&1 || true
 export LOGU="$S.fallo-sin.log"
 config_demo restaurar
-comprobar_rev "$N" "escalar_fallos: false → Bloqueo al primer fallo, como antes" <<'PY' || cat "$S.fallo-sin.log"
+comprobar_rev "$N" "escalar_fallos: \"false\" (texto) en el config.json → Bloqueo al primer fallo, como antes" <<'PY' || cat "$S.fallo-sin.log"
 from revlib import *
 b = campos.get("Bloqueo") or ""
 assert campos["Estado"] == "To Do" and "Diff fuera de alcance: fuera-de-alcance.txt" in b and "intento(s)" not in b, campos
@@ -793,6 +793,18 @@ assert "RESULTADO: ACEPTADO" in t and "fuera de la carpeta" not in t, t
 assert not os.path.exists("prueba-local-plus.txt") and not os.path.exists("proyectos/demo/prueba-local-plus.txt")
 assert glob.glob("proyectos/demo/estado/pruebas/local-plus-*/prueba-local-plus.txt"), "no está en la carpeta de la prueba"
 PY
+rm -rf proyectos/demo/estado/pruebas/local-plus-*
+config_demo git_bin '["false"]'   # git que siempre falla: no se puede crear el repo aislado
+FAKE_OPENCODE_RAIZ_GIT=1 python3 equipo.py demo probar local-plus > "$S.probar-sin-git.log" 2>&1 && R=0 || R=$?
+config_demo restaurar
+R=$R python3 - "$S.probar-sin-git.log" <<'PY' && ok "probar sin poder crear el repo aislado: se detiene sin lanzar el agente ni escribir en la raíz" || { cat "$S.probar-sin-git.log"; mal "probar sin repo aislado"; }
+import glob, os, sys
+t = open(sys.argv[1], encoding="utf-8").read()
+assert os.environ["R"] != "0" and "no pude crear el repo git aislado" in t and "el agente no se ha ejecutado" in t, t
+assert "RESULTADO" not in t, t
+assert not os.path.exists("prueba-local-plus.txt") and not os.path.exists("proyectos/demo/prueba-local-plus.txt")
+assert not glob.glob("proyectos/demo/estado/pruebas/local-plus-*/salida-agente.log"), "se lanzó el agente"
+PY
 
 cp opencode.json "$S.opencode-diag.json"
 python3 - <<'PY'
@@ -826,6 +838,23 @@ import json, os
 s = json.load(open(os.environ["FAKE_GH_STATE"]))
 etq = s.get("labels", {}).get("oscar/demo-app", [])
 assert {"agent:solo-demo", "agent:codex", "agent:local-plus", "agent:local", "agent:claude"} <= set(etq), etq
+PY
+grep -q "etiquetas al día" "$S.preparar.log" && ok "preparar sin errores: «etiquetas al día»" || { cat "$S.preparar.log"; mal "preparar: falta «etiquetas al día»"; }
+python3 - <<'PY'
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+s["labels"]["oscar/demo-app"] = [e for e in s["labels"]["oscar/demo-app"] if e != "agent:solo-demo"]
+json.dump(s, open(st, "w"))
+PY
+FAKE_GH_FALLA_ETIQUETA=agent:solo-demo python3 equipo.py demo preparar > "$S.preparar-falla.log" 2>&1 && R=0 || R=$?
+R=$R python3 - "$S.preparar-falla.log" <<'PY' && ok "preparar con una etiqueta rechazada por GitHub: lo dice, la deja pendiente y sale con error" || { cat "$S.preparar-falla.log"; mal "preparar: etiqueta rechazada"; }
+import json, os, sys
+t = open(sys.argv[1], encoding="utf-8").read()
+assert os.environ["R"] != "0", "preparar salió bien con una etiqueta rechazada"
+assert "etiquetas al día" not in t and "rechazó 1 etiqueta(s)" in t and "agent:solo-demo: HTTP 403" in t, t
+assert "Crear a mano en oscar/demo-app" in t and "faltan etiquetas en oscar/demo-app" in t, t
+s = json.load(open(os.environ["FAKE_GH_STATE"]))
+assert "agent:solo-demo" not in s["labels"]["oscar/demo-app"], s["labels"]
 PY
 cp "$S.demo-sin-motores.json" proyectos/demo/config.json
 
@@ -1113,6 +1142,31 @@ with contextlib.redirect_stdout(salida):
     assert C.normalizar_bool("quizás", True, "escalar_fallos") is True  # el aviso sale una vez, no en cada ciclo
 assert salida.getvalue().count("escalar_fallos: valor no válido") == 1, salida.getvalue()
 PY
+EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "escalar_fallos como texto en el config.json: cargar_config y la recarga de vigilar lo aplican (\"false\" apaga; valor raro → activado con aviso)" || mal "escalar_fallos como texto en el config.json"
+import contextlib, io, json
+import coordinador as C
+ruta = "proyectos/demo/config.json"
+def escribir(valor):
+    c = json.load(open(ruta)); c["escalar_fallos"] = valor; json.dump(c, open(ruta, "w"), indent=2)
+escribir(True)
+cfg = C.cargar_config()  # un `vigilar` ya arrancado con el escalado activo
+assert cfg["escalar_fallos"] is True, cfg["escalar_fallos"]
+escribir("false")  # escrito a mano como texto
+assert C.cargar_config()["escalar_fallos"] is False
+salida = io.StringIO()
+with contextlib.redirect_stdout(salida):
+    C.recargar_escalado(cfg)  # lo que hace `vigilar` al empezar cada ciclo
+assert cfg["escalar_fallos"] is False, cfg["escalar_fallos"]
+assert "Escalado: escalar_fallos = false" in salida.getvalue(), salida.getvalue()
+escribir("tal vez")  # valor raro: sigue activado, con aviso en el log
+salida = io.StringIO()
+with contextlib.redirect_stdout(salida):
+    C.recargar_escalado(cfg)
+    C.recargar_escalado(cfg)
+assert cfg["escalar_fallos"] is True, cfg["escalar_fallos"]
+assert salida.getvalue().count("escalar_fallos: valor no válido \"tal vez\"") == 1, salida.getvalue()
+PY
+cp "$S.demo-config-panel.bak" proyectos/demo/config.json
 grep -q "htmlEscalado(p)" panel.html && grep -q "/escalado" panel.html && grep -q 'id="esc-a-' panel.html \
   && grep -q 'id="esc-n-' panel.html && ok "panel.html pinta la casilla y el selector del escalado" || mal "panel.html: escalado"
 tarea() {  # tarea <proyecto> <json> → imprime «código cuerpo»

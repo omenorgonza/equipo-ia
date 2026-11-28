@@ -173,10 +173,14 @@ OpenCode no arranca, usa lo que `opencode models` llegara a listar o, si no list
 
 `probar <agente>` trabaja en una carpeta nueva de `estado/pruebas/` que es su propio repo git: OpenCode escribe en
 la raíz git del directorio actual, así que sin ese repo el archivo de la prueba caería en la raíz del laboratorio.
+Si no puede crear ese repo (`git init` falla, p. ej. por un `git_bin` mal puesto), `probar` se detiene con `FALLO`
+antes de lanzar el agente.
 
 Si añades un agente solo en el `config.json` de un proyecto, `python3 equipo.py <proyecto> preparar` crea su
 etiqueta (`agent:<nombre>`) en los repos del proyecto; repite también el resto de la preparación de GitHub
-(variables y comprobación del secreto `TABLERO_TOKEN`) sin tocar el código.
+(variables y comprobación del secreto `TABLERO_TOKEN`) sin tocar el código. Solo dice «etiquetas al día» si GitHub
+las aceptó todas: si rechaza alguna (token sin permiso de escritura, red…), lista cada etiqueta con su motivo, la deja
+en «Pendiente para Óscar» y termina con error.
 
 ### Cadena de escalado
 
