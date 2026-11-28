@@ -2897,8 +2897,13 @@ def catalogo_opencode_json() -> set[str]:
         oc = json.loads((LAB / "opencode.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return set()
-    return {f"{p}/{m}" for p, d in (oc.get("provider") or {}).items() if isinstance(d, dict)
-            for m in (d.get("models") or {}) if isinstance(d.get("models"), dict)}
+    # Un opencode.json con otra forma (lista en la raíz, `provider` o `models` que no son objetos) no es un catálogo:
+    # se ignora para que `diagnostico` diga que no hay catálogo en vez de romperse.
+    proveedores = oc.get("provider") if isinstance(oc, dict) else None
+    if not isinstance(proveedores, dict):
+        return set()
+    return {f"{p}/{m}" for p, d in proveedores.items() if isinstance(d, dict) and isinstance(d.get("models"), dict)
+            for m in d["models"]}
 
 
 def catalogo_opencode(ag: dict) -> tuple[set[str] | None, str]:
