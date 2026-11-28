@@ -275,7 +275,8 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
               "repos": [], "tablero": tb.get("url"),
               "activo": E.coordinador_activo(nombre), "columnas": {e: 0 for e in T.ESTADOS}, "atencion": [],
               "tarjetas": {}, "error": None, "pruebas": pruebas_proyecto(cfg), "progreso": [],
-              "siguiente": siguiente_json({}), "escalado": escalado_proyecto(cfg)}
+              "siguiente": siguiente_json({}), "escalado": escalado_proyecto(cfg),
+              "agentes": agentes_proyecto(cfg)}
     try:
         prog = progreso_tareas(nombre, cfg)
     except Exception:  # noqa: BLE001 — el panel nunca se cae por el progreso
@@ -467,8 +468,14 @@ def reintentar(nombre: str, numero: int) -> dict:
     return {"ok": r.returncode == 0, "mensaje": (r.stdout or r.stderr).strip()[-300:]}
 
 
-AGENTES_TAREA = ("claude", "local")
+AGENTES_TAREA = ("claude", "local")  # sin agentes en la config (proyecto antiguo), los de siempre
 PRIORIDADES_TAREA = ("P0", "P1", "P2", "P3")
+
+
+def agentes_proyecto(cfg: dict) -> list[str]:
+    """Agentes activos del proyecto (equipo.json → agentes, con lo que cambie su config.json), en su orden."""
+    ags = cfg.get("agentes") or {}
+    return [n for n, a in ags.items() if isinstance(a, dict) and a.get("activo", True)] or list(AGENTES_TAREA)
 
 
 def _lineas(valor) -> list[str]:
@@ -491,8 +498,9 @@ def crear_tarea(nombre: str, d: dict) -> tuple[dict, int]:
     if titulo.startswith("-"):
         return {"error": "El título no puede empezar por «-»"}, 400
     agente = (d.get("agente") or "").strip()
-    if agente and agente not in AGENTES_TAREA:
-        return {"error": f"Agente desconocido: {agente} (usa {', '.join(AGENTES_TAREA)})"}, 400
+    validos = agentes_proyecto(E.cfg_proyecto(nombre)) if agente else []
+    if agente and agente not in validos:
+        return {"error": f"Agente desconocido: {agente} (usa {', '.join(validos)})"}, 400
     prioridad = (d.get("prioridad") or "P2").strip()
     if prioridad not in PRIORIDADES_TAREA:
         return {"error": f"Prioridad no válida: {prioridad}"}, 400
@@ -579,7 +587,8 @@ def escalado_proyecto(cfg: dict) -> dict:
     return {"activo": bool(cfg.get("escalar_fallos", True)),
             "fallos": C.normalizar_fallos(cfg.get("fallos_para_escalar")),
             "opciones": list(C.FALLOS_PARA_ESCALAR),
-            "senior": (cfg.get("revision") or {}).get("senior") or C.REVISION_DEFECTO["senior"]}
+            "senior": (cfg.get("revision") or {}).get("senior") or C.REVISION_DEFECTO["senior"],
+            "cadena": C.normalizar_cadena(cfg.get("cadena_escalado"))}  # solo lectura: se cambia en el config.json
 
 
 def guardar_escalado(nombre: str, d: dict) -> tuple[dict, int]:

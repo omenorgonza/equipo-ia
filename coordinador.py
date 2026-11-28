@@ -2,7 +2,7 @@
 """Coordinador local del equipo IA (equipo-ia-lab).
 
 Recoge issues preparadas por el Team Leader (Codex) en GitHub, invoca al
-desarrollador asignado (Claude Code u OpenCode + Ollama) en un git worktree
+desarrollador asignado (Claude Code, Codex u OpenCode + Ollama) en un git worktree
 propio y devuelve una PR con pruebas.
 
 Solo usa la biblioteca estándar de Python (3.9+).
@@ -16,8 +16,8 @@ Operaciones principales:
   reanudar N           Vuelve a encolar la issue N desde el paso pendiente.
 Auxiliares:
   iniciar              Crea config.json a partir de config.example.json.
-  configurar-local     Fija el modelo de Ollama en opencode.json y config.json.
-  probar claude|local  Prueba de aceptación de un desarrollador (fase 2).
+  configurar-local     Fija el modelo de Ollama de un agente local (--agente, por defecto «local»).
+  probar <agente>      Prueba de aceptación de un desarrollador (fase 2).
 """
 from __future__ import annotations
 
@@ -51,9 +51,9 @@ EQUIPO_JSON = LAB / "equipo.json"
 CLAVES_COMPARTIDAS = ("agentes", "ollama_url", "gh_bin", "git_bin", "max_trabajadores", "max_por_proveedor",
                       "timeout_agente_s", "timeout_pruebas_s", "espera_reintento_s", "intervalo_consulta_s",
                       "contexto_minimo_local", "pruebas_comunes", "revision", "escalar_fallos",
-                      "fallos_para_escalar")
+                      "fallos_para_escalar", "cadena_escalado")
 # Escalado automático al senior: el panel cambia estas claves del config.json y `vigilar` las relee en cada ciclo.
-CLAVES_ESCALADO = ("escalar_fallos", "fallos_para_escalar")
+CLAVES_ESCALADO = ("escalar_fallos", "fallos_para_escalar", "cadena_escalado")
 FALLOS_PARA_ESCALAR = (1, 2, 3, 4, 5)  # intentos del junior antes de pasar la tarea al senior
 # Revisión entre agentes (equipo.json → revision; cada proyecto puede cambiar claves en su config.json).
 REVISION_DEFECTO = {
@@ -61,6 +61,7 @@ REVISION_DEFECTO = {
     "antes_de_pr": False,      # por proyecto: las rondas van antes de subir la rama y abrir la PR
     "pruebas_locales": [],     # con antes_de_pr: claves de `pruebas` que forman toda la batería
     "intensiva_cada": 0,       # con antes_de_pr: ronda intensiva antes de cada N.ª PR del proyecto (0 = nunca)
+    "reservas": {},            # revisor sin cuota → quién revisa en su lugar (p. ej. {"codex": "claude"})
 }
 ESTADO = PD / "estado"
 DB_PATH = ESTADO / "registro.db"
@@ -83,10 +84,10 @@ ENV_PREFIJOS_PROHIBIDOS = (
     "ANTHROPIC_", "CLAUDE_CODE_USE_", "AWS_BEARER_TOKEN_BEDROCK", "OPENAI_",
     "AZURE_OPENAI", "GEMINI_", "GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI",
     "OPENROUTER_", "GROQ_", "MISTRAL_", "DEEPSEEK_", "XAI_", "TOGETHER_",
-    "FIREWORKS_", "CEREBRAS_", "COHERE_", "VERTEX_",
+    "FIREWORKS_", "CEREBRAS_", "COHERE_", "VERTEX_", "CODEX_API_KEY",
 )
 
-PATRONES_CUOTA = re.compile(r"usage limit|rate.?limit|quota|limit reached|out of credits|credit balance|\b429\b", re.I)
+PATRONES_CUOTA = re.compile(r"usage.?limit|rate.?limit|quota|limit reached|out of credits|credit balance|\b429\b", re.I)
 PATRONES_RED = re.compile(r"ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network error|connection reset|temporarily unavailable|\b50[234]\b", re.I)
 PATRONES_PERMISO = re.compile(r"permission denied|not permitted|denied by|requires approval|permission to (write|edit)", re.I)
 
@@ -141,6 +142,14 @@ def normalizar_fallos(valor) -> int:
     return max(FALLOS_PARA_ESCALAR[0], min(FALLOS_PARA_ESCALAR[-1], n))
 
 
+def normalizar_cadena(valor) -> list[str]:
+    """cadena_escalado: agentes en orden (junior → … → senior). Sin valor o con uno no válido, lista vacía: el junior
+    escala directamente a revision.senior, como siempre."""
+    if not isinstance(valor, list):
+        return []
+    return list(dict.fromkeys(x.strip() for x in valor if isinstance(x, str) and x.strip()))
+
+
 def recargar_escalado(cfg: dict) -> None:
     """Relee del config.json las claves del escalado (las cambia el panel) sin reiniciar `vigilar`.
     Si el archivo no se puede leer en ese instante, se mantienen los valores anteriores."""
@@ -149,7 +158,7 @@ def recargar_escalado(cfg: dict) -> None:
     except (Exception, SystemExit) as e:  # noqa: BLE001 — un config a medio escribir no para el equipo
         log(f"No pude releer el config.json ({str(e)[:160]}); sigo con el escalado anterior")
         return
-    for k in CLAVES_ESCALADO:
+    for k in CLAVES_ESCALADO:  # cargar_config ya las deja normalizadas
         if cfg.get(k) != nuevo.get(k):
             log(f"Escalado: {k} = {json.dumps(nuevo.get(k))} (cambiado en el config.json)")
             cfg[k] = nuevo.get(k)
@@ -180,6 +189,7 @@ def cargar_config() -> dict:
     cfg.setdefault("fuente_cola", "etiquetas")
     cfg["escalar_fallos"] = bool(cfg.get("escalar_fallos", True))  # junior que falla: reintento y después el senior
     cfg["fallos_para_escalar"] = normalizar_fallos(cfg.get("fallos_para_escalar"))
+    cfg["cadena_escalado"] = normalizar_cadena(cfg.get("cadena_escalado"))
     rev = fusionar(REVISION_DEFECTO, cfg.get("revision") or {})
     rev["rondas_minimas"] = max(2, int(rev["rondas_minimas"]))  # nunca menos de dos rondas
     rev["rondas_maximas"] = max(rev["rondas_minimas"], int(rev["rondas_maximas"]))
@@ -639,14 +649,91 @@ def args_opencode_solo_lectura(args: list[str]) -> list[str]:
                                 "--dangerously-skip-permissions"}) + ["--agent", "plan"]
 
 
-def intento_de_escritura(stdout: str) -> str | None:
-    """Herramienta de escritura que el revisor intentó usar, aunque el permiso se denegara (stream-json)."""
+OPCIONES_CODEX_ESCRITURA = {"--sandbox", "-s", "--full-auto", "--dangerously-bypass-approvals-and-sandbox", "--yolo",
+                            "--add-dir", "--last"}
+
+
+def args_codex(args: list[str], solo_lectura: bool = False) -> list[str]:
+    """`codex exec` sin terminal: eventos JSONL (--json) y el prompt por stdin («-»). Revisor: sandbox de solo lectura,
+    sin aprobaciones automáticas, sin retomar sesiones y sin -c que toque el sandbox o las aprobaciones."""
+    args = [a for a in (args or ["exec"]) if a not in ("-", "--json")]
+    if "exec" not in args:
+        args = ["exec"] + args
+    if solo_lectura:
+        limpio, i = [], 0
+        while i < len(args):
+            a = args[i]
+            if a in ("-c", "--config") and i + 1 < len(args):
+                if not re.search(r"sandbox|approval", args[i + 1], re.I):
+                    limpio += [a, args[i + 1]]
+                i += 2
+                continue
+            if a == "resume" or re.match(r"^(-c|--config)=.*(sandbox|approval)", a, re.I):
+                i += 1
+                continue
+            limpio.append(a)
+            i += 1
+        args = _sin_opciones(limpio, OPCIONES_CODEX_ESCRITURA) + ["--sandbox", "read-only"]
+    return args + ["--json", "-"]
+
+
+def _eventos_jsonl(stdout: str):
     for linea in (stdout or "").splitlines():
         try:
             ev = json.loads(linea)
         except ValueError:
             continue
-        if not isinstance(ev, dict) or ev.get("type") != "assistant":
+        if isinstance(ev, dict):
+            yield ev
+
+
+def resumir_evento_codex(linea: str) -> str | None:
+    """Resumen legible de un evento de `codex exec --json`; otra salida, tal cual."""
+    try:
+        ev = json.loads(linea)
+    except ValueError:
+        return linea
+    if not isinstance(ev, dict):
+        return linea
+    tipo, item = ev.get("type"), ev.get("item") if isinstance(ev.get("item"), dict) else {}
+    if tipo == "thread.started":
+        return "sesión iniciada (codex)"
+    if tipo == "turn.completed":
+        uso = ev.get("usage") or {}
+        return "turno terminado" + (f" · {uso.get('output_tokens')} tokens de salida" if uso.get("output_tokens") else "")
+    if tipo in ("turn.failed", "error"):
+        return "error: " + _corto((ev.get("error") or {}).get("message") if isinstance(ev.get("error"), dict)
+                                  else ev.get("message") or "", 200)
+    it = item.get("type")
+    if tipo == "item.started" and it == "command_execution":
+        return f"herramienta shell: ejecuta {_corto(item.get('command') or '')}"
+    if tipo == "item.completed":
+        if it == "agent_message" and (item.get("text") or "").strip():
+            return "dice: " + _corto(item["text"], 160)
+        if it == "file_change":
+            return "edita " + _corto(", ".join(c.get("path", "?") for c in item.get("changes") or [] if isinstance(c, dict)))
+        if it == "reasoning":
+            return PENSANDO
+    return None
+
+
+def texto_codex(stdout: str) -> str:
+    """Último mensaje de Codex (`item.completed` de tipo agent_message); sin eventos, la salida tal cual."""
+    textos = [str(ev["item"].get("text") or "") for ev in _eventos_jsonl(stdout)
+              if ev.get("type") == "item.completed" and isinstance(ev.get("item"), dict)
+              and ev["item"].get("type") == "agent_message"]
+    return textos[-1] if textos else (stdout or "")
+
+
+def intento_de_escritura(stdout: str) -> str | None:
+    """Herramienta de escritura que el revisor intentó usar, aunque el permiso se denegara (stream-json de claude o
+    eventos `file_change` de codex)."""
+    for ev in _eventos_jsonl(stdout):
+        item = ev.get("item") if isinstance(ev.get("item"), dict) else {}
+        if str(ev.get("type") or "").startswith("item.") and item.get("type") == "file_change":
+            rutas = ", ".join(c.get("path", "?") for c in item.get("changes") or [] if isinstance(c, dict))
+            return f"file_change {_corto(rutas)}".strip()
+        if ev.get("type") != "assistant":
             continue
         contenido = (ev.get("message") or {}).get("content")
         for c in contenido if isinstance(contenido, list) else []:
@@ -1032,7 +1119,8 @@ def validar_issue(cfg: dict, issue: dict, escalado_a: str | None = None) -> tupl
     agente = agente_de_etiquetas(cfg, etiquetas)
     if not agente:
         raise Bloqueo("La issue no tiene exactamente una etiqueta de agente válida",
-                      "Deja una sola etiqueta agent:claude o agent:local y vuelve a poner ready.")
+                      f"Deja una sola etiqueta de agente ({', '.join(a['etiqueta'] for a in cfg['agentes'].values())}) "
+                      "y vuelve a poner ready.")
     datos = parsear_issue(issue.get("body", ""))
     if datos["agente"] and datos["agente"] != agente and agente != escalado_a:
         raise Bloqueo(f"El campo Agente ({datos['agente']}) no coincide con la etiqueta ({agente})",
@@ -1063,8 +1151,9 @@ def lineas_intentos(intentos: list[dict]) -> str:
                      for i, x in enumerate(intentos, 1))
 
 
-def prompt_reintento(intentos: list[dict], agente: str) -> str:
-    """Añadido al prompt tras intentos fallidos: qué falló y que el worktree vuelve a estar limpio."""
+def prompt_reintento(intentos: list[dict], agente: str, senior: bool = True) -> str:
+    """Añadido al prompt tras intentos fallidos: qué falló y que el worktree vuelve a estar limpio.
+    `senior`: el agente es revision.senior (si no, es un escalón intermedio de cadena_escalado)."""
     if not intentos:
         return ""
     texto = ("\nIntentos anteriores de esta tarea que fallaron. El worktree se ha limpiado: partes de cero, sin sus "
@@ -1072,7 +1161,8 @@ def prompt_reintento(intentos: list[dict], agente: str) -> str:
              + lineas_intentos(intentos) + "\n")
     juniors = sorted({x["agente"] for x in intentos if x["agente"] != agente})
     if juniors:
-        texto += (f"\nEsta tarea ha escalado a ti, el agente senior, porque {', '.join(juniors)} no pudo terminarla. "
+        quien = "el agente senior" if senior else "el siguiente agente de la cadena de escalado"
+        texto += (f"\nEsta tarea ha escalado a ti, {quien}, porque {', '.join(juniors)} no pudo terminarla. "
                   "Impleméntala completa desde el principio.\n")
     return texto + ("Evita repetir esas causas: modifica solo archivos que encajen con los patrones permitidos (fíjate en "
                     "la ruta exacta, incluida la carpeta) y deja los criterios de aceptación cumplidos.\n")
@@ -1139,13 +1229,14 @@ def contexto_modelo(cfg: dict, modelo: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def consejo_contexto(modelo: str, minimo: int) -> str:
+def consejo_contexto(modelo: str, minimo: int, agente: str = "local") -> str:
     base = modelo.split(":")[0]
+    opcion = "" if agente == "local" else f"--agente {agente} "
     return (f"  ⚠ {modelo} no fija un contexto ≥ {minimo} tokens: OpenCode no cabrá y el agente se atascará.\n"
             f"    En PowerShell de Windows crea una variante y usa esa:\n"
             f"      \"FROM {modelo}`nPARAMETER num_ctx 32768\" | Set-Content -Encoding ascii \"$env:TEMP\\Modelfile-ctx\"\n"
             f"      ollama create {base}-32k -f \"$env:TEMP\\Modelfile-ctx\"\n"
-            f"    y después: python3 coordinador.py configurar-local --modelo {base}-32k:latest")
+            f"    y después: python3 coordinador.py configurar-local {opcion}--modelo {base}-32k:latest")
 
 
 def ollama_ps(cfg: dict) -> list[str]:
@@ -1207,7 +1298,10 @@ def invocar_agente(cfg: dict, nombre: str, cwd: Path, prompt: str, archivo_promp
                           "No se usa ningún proveedor alternativo.")
         modelo = ag["modelo"]
         extra = ag.get("args_extra", [])
-        cmd = ag["bin"] + ["run", "--model", modelo] + \
+        # `opencode run --standalone`: cada ejecución por su cuenta, sin compartir sesión con otro agente local.
+        # Un OpenCode que no conozca la opción: "standalone": false en el agente.
+        aislado = ["--standalone"] if ag.get("standalone", True) and "--standalone" not in extra else []
+        cmd = ag["bin"] + ["run", *aislado, "--model", modelo] + \
             (args_opencode_solo_lectura(extra) if solo_lectura else extra) + \
             ["--file", str(archivo_prompt), "Sigue exactamente las instrucciones del archivo adjunto."]
         r = ejecutar_en_directo(cmd, cwd=cwd, timeout=cfg["timeout_agente_s"], env=entorno_limpio(),
@@ -1222,6 +1316,12 @@ def invocar_agente(cfg: dict, nombre: str, cwd: Path, prompt: str, archivo_promp
         cmd = ag["bin"] + args_claude_en_directo(args_claude_solo_lectura(args) if solo_lectura else args)
         r = ejecutar_en_directo(cmd, cwd=cwd, timeout=cfg["timeout_agente_s"], stdin_text=prompt,
                                 env=entorno_limpio(), resumir=resumir_evento_claude, al_linea=al_linea)
+    elif ag["proveedor"] == "codex":
+        # Codex CLI con la sesión de `codex login` (cuenta ChatGPT): entorno_limpio quita OPENAI_*/CODEX_API_KEY, así
+        # que nunca pasa a la API de pago. Autor: sandbox de escritura en el worktree; revisor: solo lectura.
+        cmd = ag["bin"] + args_codex(ag.get("args") or ["exec", "--sandbox", "workspace-write"], solo_lectura)
+        r = ejecutar_en_directo(cmd, cwd=cwd, timeout=cfg["timeout_agente_s"], stdin_text=prompt,
+                                env=entorno_limpio(), resumir=resumir_evento_codex, al_linea=al_linea)
     else:
         raise Bloqueo(f"Proveedor desconocido {ag['proveedor']}", "Revisa config.json.")
     return r, evidencia
@@ -1248,6 +1348,8 @@ def texto_de_agente(cfg: dict, nombre: str, r: subprocess.CompletedProcess) -> s
     if cfg["agentes"][nombre]["proveedor"] == "anthropic":
         ev = resultado_claude(r.stdout)
         return "" if ev.get("is_error") else str(ev.get("result") or "")
+    if cfg["agentes"][nombre]["proveedor"] == "codex":
+        return texto_codex(r.stdout)
     return r.stdout or ""
 
 
@@ -1425,6 +1527,8 @@ def seccion_revision(tiempos: dict, cfg: dict) -> str:
         lineas.append(f"- Escalada de `{esc['de']}` a `{esc['a']}`: {publicable(esc['motivo'])}")
     if rev.get("invalidas"):
         lineas.append(f"- Intentos de revisión que no contaron: {len(rev['invalidas'])}")
+    for x in rev.get("avisos", []):
+        lineas.append(f"- Revisión {x['n']}: {publicable(x['texto'])}")
     if meta.get("historial"):
         lineas.append(f"- Ciclos de revisión anteriores (sobre código anterior): {len(meta['historial'])}")
     if rc.get("antes_de_pr"):
@@ -1605,6 +1709,22 @@ class Procesador:
         ag = self.cfg["agentes"].get(senior or "")
         return senior if senior and senior != agente and ag and ag.get("activo", True) else None
 
+    def _siguiente_escalon(self, agente: str) -> str | None:
+        """A quién pasa la tarea cuando `agente` gasta sus intentos. Con cadena_escalado (p. ej. local → local-plus →
+        claude), el siguiente agente activo de la cadena; sin cadena (o si el agente no está en ella), el senior."""
+        cadena = self.cfg.get("cadena_escalado") or []
+        if agente not in cadena:
+            return self._senior_disponible(agente)
+        for x in cadena[cadena.index(agente) + 1:]:
+            ag = self.cfg["agentes"].get(x)
+            if ag and ag.get("activo", True):
+                return x
+        return None
+
+    def _max_intentos(self) -> int:
+        """Tope de seguridad de intentos en una pasada: los de cada escalón de la cadena más el último."""
+        return self.cfg["fallos_para_escalar"] * max(1, len(self.cfg.get("cadena_escalado") or []) - 1) + 1
+
     def _procesar_reintentando(self, con, issue_gh: dict, intentos: list[dict]) -> str:
         """Fallo del agente por su culpa (código ≠ 0, sin cambios, fuera de alcance, pruebas en rojo): el junior repite
         desde un worktree limpio hasta gastar `fallos_para_escalar` intentos y después la tarea pasa al senior.
@@ -1614,7 +1734,7 @@ class Procesador:
             try:
                 return self._procesar(con, issue_gh)
             except Bloqueo as b:
-                if not (b.culpa and self.cfg["escalar_fallos"]) or len(intentos) > self.cfg["fallos_para_escalar"] + 1:
+                if not (b.culpa and self.cfg["escalar_fallos"]) or len(intentos) > self._max_intentos():
                     raise
                 self._tras_fallo_agente(con, issue_gh, b, intentos)
 
@@ -1631,7 +1751,7 @@ class Procesador:
         agente = agente_de_etiquetas(self.cfg, {l["name"] for l in issue_gh.get("labels", [])})
         if not agente or agente == self.cfg["revision"].get("senior"):
             return
-        senior = self._senior_disponible(agente)
+        senior = self._siguiente_escalon(agente)
         gastados = (t.get("fallos_cuenta") or {}).get(agente, 0)
         if not senior or gastados < self.cfg["fallos_para_escalar"]:
             return
@@ -1656,7 +1776,7 @@ class Procesador:
             anotar_leccion_pendiente(agente, numero, b.causa, b.evidencia or "(sin log)")
             b.anotada = True
         propios, maximo = cuenta[agente], self.cfg["fallos_para_escalar"]
-        senior = self._senior_disponible(agente)
+        senior = self._siguiente_escalon(agente)  # sin cadena_escalado, el senior
         if agente != senior_cfg and propios < maximo:
             log(f"#{numero}: '{agente}' falló ({_corto(b.causa, 160)}); intento {propios + 1}/{maximo} "
                 "desde un worktree limpio")
@@ -1688,7 +1808,8 @@ class Procesador:
                                 "intentos": lineas_intentos(intentos)}
         actualizar(con, self.repo, numero, agente=senior, tiempos=json.dumps(t))
         progreso_agente(numero, senior)
-        log(f"#{numero}: '{junior}' falló {veces} {'vez' if veces == 1 else 'veces'}; escala al senior '{senior}'")
+        papel = "al senior" if senior == self.cfg["revision"].get("senior") else "en la cadena de escalado a"
+        log(f"#{numero}: '{junior}' falló {veces} {'vez' if veces == 1 else 'veces'}; escala {papel} '{senior}'")
         self._avisar_escalada_fallos(con, issue_gh)
 
     def _avisar_escalada_fallos(self, con, issue_gh: dict) -> None:
@@ -1706,7 +1827,8 @@ class Procesador:
         if nuevo != cuerpo:
             self.gh.editar_cuerpo_issue(numero, nuevo)
         issue_gh["body"] = nuevo
-        self.gh.comentar(numero, f"**La tarea pasa a `{senior}` (senior) 🤝**\n\n`{junior}` la ha intentado {veces} "
+        papel = "senior" if senior == self.cfg["revision"].get("senior") else "siguiente en la cadena de escalado"
+        self.gh.comentar(numero, f"**La tarea pasa a `{senior}` ({papel}) 🤝**\n\n`{junior}` la ha intentado {veces} "
                                  f"{'vez' if veces == 1 else 'veces'} sin terminarla. `{senior}` empieza desde un "
                                  f"worktree limpio en la misma rama.\n\nIntentos:\n{publicable(e.get('intentos') or '')}\n")
         t = self._tiempos(con, numero)
@@ -1819,7 +1941,8 @@ class Procesador:
             t = self._tiempos(con, numero)
             prompt += prompt_correccion(t.get("revision") or {}, t.get("revision_meta") or {}, agente,
                                         self.cfg["revision"]["rondas_minimas"])
-            prompt += prompt_reintento(t.get("fallos_agente") or [], agente)
+            prompt += prompt_reintento(t.get("fallos_agente") or [], agente,
+                                       agente == self.cfg["revision"].get("senior"))
             with self.turno(numero, agente):
                 r, evid = invocar_agente(self.cfg, agente, wt, prompt, PROMPTS / f"issue-{numero}.md",
                                          al_linea=lambda texto: progreso_actividad(numero, texto))
@@ -2272,7 +2395,9 @@ class Procesador:
         else:
             pruebas = str(self._tiempos(con, numero).get("pruebas") or "")
         prompt = prompt_revisor(numero, titulo, datos, autor, n, total, tipo, redactar(diff), pruebas, rev, minimas)
-        for intento in (1, 2):
+        intento, usados = 0, {revisor}
+        while intento < 2:
+            intento += 1
             log(f"#{numero}: revisión {n}/{total} · revisor: {revisor} ({TIPOS_REVISION[tipo][0]})")
             foto = self._foto(wt)
             with self.turno(numero, revisor):
@@ -2293,6 +2418,19 @@ class Procesador:
                 try:
                     clasificar_fallo_agente(r)
                 except Bloqueo as b:
+                    reserva = self._reserva_revisor(revisor, usados)
+                    if b.causa.startswith("Cuota agotada") and reserva:
+                        # revisor sin cuota: revisa la reserva (revision.reservas), sin gastar el intento de la ronda
+                        log(f"#{numero}: el revisor '{revisor}' no tiene cuota; revisa '{reserva}' (reserva)")
+                        rev.setdefault("avisos", []).append({
+                            "n": n, "publicada": False,
+                            "texto": f"el revisor `{revisor}` no tiene cuota: revisa `{reserva}` (reserva)"})
+                        self._guardar_revision(con, numero, rev, meta)
+                        if publicada:
+                            self._publicar_rondas(con, numero, rev, meta)
+                        revisor, intento = reserva, intento - 1
+                        usados.add(reserva)
+                        continue
                     b.causa = f"Revisión entre agentes ({revisor}): {b.causa}"
                     b.evidencia = f"Log: {logp}"
                     raise
@@ -2314,10 +2452,21 @@ class Procesador:
         raise Bloqueo(f"Revisión entre agentes: la ronda {n} no es válida ({motivo})",
                       f"Revisa el log del revisor ({revisor}) y ejecuta `reanudar {numero}`: la ronda se repite.", f"Log: {logp}")
 
+    def _reserva_revisor(self, revisor: str, usados: set[str]) -> str | None:
+        """Reserva configurada para un revisor sin cuota (revision.reservas), si está activa y aún no se ha probado."""
+        r = (self.cfg["revision"].get("reservas") or {}).get(revisor)
+        ag = self.cfg["agentes"].get(r or "")
+        return r if r and r not in usados and ag and ag.get("activo", True) else None
+
     def _publicar_rondas(self, con, numero: int, rev: dict, meta: dict) -> None:
         """Comenta en la PR lo que aún no esté publicado (primero se guarda la ronda y después se publica)."""
         pr = obtener(con, self.repo, numero)["pr_numero"]
         minimas = self.cfg["revision"]["rondas_minimas"]
+        for x in rev.get("avisos", []):
+            if not x["publicada"]:
+                self.gh.comentar_pr(pr, f"Revisión {x['n']}/{max(x['n'], minimas)} · nota: {publicable(x['texto'])}")
+                x["publicada"] = True
+                self._guardar_revision(con, numero, rev, meta)
         for x in rev.get("invalidas", []):
             if not x["publicada"]:
                 self.gh.comentar_pr(pr, f"Revisión {x['n']}/{max(x['n'], minimas)} · revisor: {x['revisor']} → "
@@ -2636,6 +2785,10 @@ def version(cmd: list[str]) -> str:
 
 def redactar(texto: str) -> str:
     texto = re.sub(r"(sk-ant-[\w-]{4})[\w-]+", r"\1…", texto)
+    texto = re.sub(r"\b(sk-(?!ant-)[A-Za-z0-9_-]{2})[A-Za-z0-9_-]{6,}", r"\1…", texto)  # claves de OpenAI
+    texto = re.sub(r"((?:access|refresh|id)_token|api_key|OPENAI_API_KEY|CODEX_API_KEY)([\"']?\s*[:=]\s*[\"']?)[^\s\"',}]+",
+                   r"\1\2***", texto, flags=re.I)
+    texto = re.sub(r"\beyJ[A-Za-z0-9_-]{8,}(\.[A-Za-z0-9_-]+){0,2}", "eyJ…", texto)  # JWT (sesión de ChatGPT)
     texto = re.sub(r"(gh[pousr]_[A-Za-z0-9]{2})[A-Za-z0-9_]+", r"\1…", texto)
     texto = re.sub(r"(github_pat_[A-Za-z0-9]{2})[A-Za-z0-9_]+", r"\1…", texto)
     texto = re.sub(r"(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}", r"\1***", texto, flags=re.I)
@@ -2681,13 +2834,100 @@ def cmd_diagnostico(_a) -> None:
         clon = PD / cfg["clon_local"]
         print(f"\nClon local: {clon} {'(existe)' if (clon / '.git').exists() else '(NO existe)'}")
         oc = LAB / "opencode.json"
-        print(f"opencode.json del laboratorio: {'existe' if oc.exists() else 'NO existe'}; modelo local configurado: {cfg['agentes']['local'].get('modelo')}")
+        print(f"opencode.json del laboratorio: {'existe' if oc.exists() else 'NO existe'}; modelo local configurado: "
+              f"{(cfg['agentes'].get('local') or {}).get('modelo')}")
+        diagnostico_motores(cfg, ok)
+
+
+def catalogo_opencode(ag: dict) -> tuple[set[str] | None, str]:
+    """Modelos que OpenCode conoce (`opencode models`, uno «proveedor/modelo» por línea). None si no se pudo consultar."""
+    r = ejecutar(ag["bin"] + ["models"], cwd=LAB, timeout=60, env=entorno_limpio())
+    if r.returncode != 0:
+        return None, redactar(((r.stderr or "") + (r.stdout or "")).strip())[:200] or f"código {r.returncode}"
+    return {l.strip().split()[0] for l in (r.stdout or "").splitlines() if l.strip()}, ""
+
+
+def diagnostico_motores(cfg: dict, ollama_ok: bool) -> None:
+    """Motores del equipo: cada agente local (modelo instalado, contexto y catálogo de OpenCode) y cada Codex
+    (versión y sesión). Nunca muestra secretos: toda la salida pasa por `redactar`."""
+    print("\nMotores del equipo:")
+    cadena = cfg.get("cadena_escalado") or []
+    revisores = cfg["revision"].get("revisores") or {}
+    reservas = cfg["revision"].get("reservas") or {}
+    instalados = set()
+    if ollama_ok:
+        instalados = {m["name"] for m in ollama_get(cfg, "/api/tags").get("models", [])}
+    catalogos: dict[str, tuple] = {}
+    for nombre, ag in cfg["agentes"].items():
+        estado = "activo" if ag.get("activo", True) else "inactivo"
+        print(f"  {nombre} ({ag.get('proveedor')}, {ag.get('etiqueta')}, {estado}) · revisor: {revisor_de(cfg, nombre)}"
+              + (f" · reserva si no tiene cuota: {reservas[nombre]}" if nombre in reservas else ""))
+        if not ag.get("activo", True):
+            continue  # agente apagado («activo»: false): no se comprueba ni se invoca
+        if ag.get("proveedor") == "ollama":
+            ident = ag.get("modelo") or ""
+            modelo = ident.split("/", 1)[1] if ident.startswith("ollama/") else ident
+            print(f"    modelo: {ident or '(sin modelo)'} · ejecución: opencode run "
+                  f"{'--standalone ' if ag.get('standalone', True) else ''}--model {ident}")
+            if ollama_ok and modelo not in instalados:
+                print(f"    ⚠ {modelo} no está instalado en Ollama: `ollama pull {modelo}` o "
+                      f"`configurar-local --agente {nombre} --modelo <otro>`")
+            elif ollama_ok:
+                ctx = contexto_modelo(cfg, modelo)
+                minimo = cfg.get("contexto_minimo_local", 16384)
+                if not ctx or ctx < minimo:
+                    print(consejo_contexto(modelo, minimo, nombre))
+            clave = json.dumps(ag["bin"])
+            if clave not in catalogos:
+                catalogos[clave] = catalogo_opencode(ag)
+            catalogo, error = catalogos[clave]
+            if catalogo is None:
+                print(f"    ? no pude consultar el catálogo de OpenCode (`opencode models`): {error}")
+            elif ident not in catalogo:
+                print(f"    ⚠ {ident} no está en el catálogo de OpenCode (`opencode models`): añádelo a "
+                      "provider.ollama.models de opencode.json o el agente fallará al arrancar")
+            else:
+                print("    catálogo de OpenCode: ✓")
+        elif ag.get("proveedor") == "codex":
+            rv = ejecutar(ag["bin"] + ["--version"], cwd=LAB, timeout=30, env=entorno_limpio())
+            print("    versión: " + redactar(((rv.stdout or rv.stderr or "").strip().splitlines() or ["?"])[0]
+                                         if rv.returncode == 0 else f"NO DISPONIBLE ({(rv.stderr or '').strip()[:120]})"))
+            r = ejecutar(ag["bin"] + ["login", "status"], cwd=LAB, timeout=30, env=entorno_limpio())
+            sesion = redactar(((r.stdout or "") + (r.stderr or "")).strip())[:400] or f"sin salida (código {r.returncode})"
+            print("    sesión (codex login status): " + sesion.replace("\n", "\n      "))
+            if re.search(r"api key", sesion, re.I):
+                print("    ⚠ Codex está con una API key (uso de pago): inicia sesión con tu cuenta ChatGPT (`codex login`)")
+            elif r.returncode != 0 or not re.search(r"(?<!not )logged in", sesion, re.I):
+                print("    ⚠ Codex sin sesión: ejecuta `codex login` con tu cuenta ChatGPT")
+    if cadena:
+        print(f"  Cadena de escalado: {' → '.join(cadena)}"
+              + "".join(f"\n    ⚠ «{x}» no es un agente configurado" for x in cadena if x not in cfg["agentes"]))
+    else:
+        print(f"  Cadena de escalado: (sin configurar) junior → {cfg['revision'].get('senior')}")
+    for autor, revisor in revisores.items():
+        if revisor not in cfg["agentes"]:
+            print(f"  ⚠ revision.revisores: «{revisor}» (revisor de {autor}) no es un agente configurado")
 
 
 def cmd_configurar_local(a) -> None:
+    agente = a.agente or "local"
     cfg_path = EQUIPO_JSON if (PROYECTO and EQUIPO_JSON.exists()) else PD / "config.json"
+    if PROYECTO and cfg_path == EQUIPO_JSON and (PD / "config.json").exists():
+        propio = json.loads((PD / "config.json").read_text(encoding="utf-8"))
+        if agente in (propio.get("agentes") or {}):  # agente definido (o redefinido) solo en este proyecto
+            cfg_path = PD / "config.json"
     cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    c2 = {"ollama_url": cfg.get("ollama_url", "http://127.0.0.1:11434")}
+    ag = (cfg.get("agentes") or {}).get(agente)
+    if cfg_path != EQUIPO_JSON and PROYECTO and EQUIPO_JSON.exists() and ag is not None:
+        # para comprobar el proveedor, el agente completo (equipo.json con lo que cambie el proyecto)
+        ag = fusionar((json.loads(EQUIPO_JSON.read_text(encoding="utf-8")).get("agentes") or {}).get(agente) or {}, ag)
+    if not ag:
+        sys.exit(f"No hay ningún agente «{agente}» en {cfg_path.name} → agentes. Añádelo primero "
+                 "(docs/agentes-y-lecciones.md, «Motores del equipo»).")
+    if ag.get("proveedor") != "ollama":
+        sys.exit(f"«{agente}» no es un agente local (proveedor {ag.get('proveedor')!r}, no 'ollama').")
+    c2 = {"ollama_url": cfg.get("ollama_url") or (cargar_config().get("ollama_url") if PROYECTO else None)
+          or "http://127.0.0.1:11434"}
     ok, detalle = ollama_disponible(c2)
     if not ok:
         sys.exit(f"Ollama no responde: {detalle}")
@@ -2713,15 +2953,22 @@ def cmd_configurar_local(a) -> None:
     oc_path = LAB / "opencode.json"
     oc = json.loads(oc_path.read_text(encoding="utf-8")) if oc_path.exists() else \
         json.loads((LAB / "plantillas" / "opencode.template.json").read_text(encoding="utf-8"))
-    oc["model"] = ident
-    oc_path.write_text(json.dumps(oc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    cfg["agentes"]["local"]["modelo"] = ident
+    antes = json.dumps(oc, sort_keys=True)
+    if agente == "local":  # el modelo por defecto de OpenCode es el del agente «local»; los demás van con --model
+        oc["model"] = ident
+    modelos = ((oc.get("provider") or {}).get("ollama") or {}).get("models")
+    if isinstance(modelos, dict) and modelo not in modelos:  # catálogo propio de opencode.json: el modelo debe estar
+        modelos[modelo] = {"name": modelo}
+    if agente == "local" or json.dumps(oc, sort_keys=True) != antes:
+        oc_path.write_text(json.dumps(oc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    cfg["agentes"][agente]["modelo"] = ident
     cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"Fijado {ident} en opencode.json y {cfg_path.name}")
+    print(f"Fijado {ident} para el agente {agente} en {cfg_path.name}"
+          + (" y opencode.json" if agente == "local" else ""))
     minimo = cfg.get("contexto_minimo_local", 16384)
     ctx = contexto_modelo(c2, modelo)
     if not ctx or ctx < minimo:
-        print(consejo_contexto(modelo, minimo))
+        print(consejo_contexto(modelo, minimo, agente))
     else:
         print(f"Contexto del modelo: {ctx} tokens (mínimo recomendado {minimo}) ✓")
 
@@ -2730,11 +2977,14 @@ def cmd_probar(a) -> None:
     """Fase 2: el agente crea un archivo con contenido conocido; lo verifica el padre."""
     cfg = cargar_config()
     nombre = a.agente
+    if nombre not in cfg["agentes"]:
+        sys.exit(f"Agente desconocido: {nombre}. Configurados: {', '.join(cfg['agentes'])}")
+    proveedor = cfg["agentes"][nombre]["proveedor"]
     carpeta = ESTADO / "pruebas" / f"{nombre}-{dt.datetime.now():%Y%m%d-%H%M%S}"
     carpeta.mkdir(parents=True)
     archivo = f"prueba-{nombre}.txt"
     prompt = f"Crea el archivo {archivo} en el directorio actual con exactamente el texto LISTO (sin nada más). No hagas nada más."
-    antes = ollama_ps(cfg) if cfg["agentes"][nombre]["proveedor"] == "ollama" else []
+    antes = ollama_ps(cfg) if proveedor == "ollama" else []
     t0 = time.time()
     vivo = carpeta / "salida-en-directo.log"
 
@@ -2753,9 +3003,11 @@ def cmd_probar(a) -> None:
     (carpeta / "salida-agente.log").write_text(f"{r.args}\n{r.returncode}\n{r.stdout}\n{r.stderr}", encoding="utf-8")
     print(f"Carpeta: {carpeta}\nCódigo de salida: {r.returncode}  Duración: {dur}s")
     print(f"Archivo {archivo}: {'contenido=' + repr(contenido) if contenido is not None else 'NO CREADO'}")
-    if nombre == "local":
+    if proveedor == "ollama":
         print(f"Ollama api/ps antes: {antes or 'ninguno'}  después: {evid.get('ollama_ps') or 'ninguno'}")
-    if nombre == "claude":
+    if proveedor == "codex":
+        print(f"Codex dice: {_corto(redactar(texto_codex(r.stdout)), 300) or '(nada)'}")
+    if proveedor == "anthropic":
         try:
             j = resultado_claude(r.stdout)
             print(f"Claude: is_error={j.get('is_error')} coste_informado={j.get('total_cost_usd')} (con suscripción es informativo)")
@@ -2853,6 +3105,8 @@ def cmd_reanudar(a) -> None:
 
 def cmd_leccion(a) -> None:
     """Convierte un fallo en una lección para que el agente no lo repita."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", a.agente):
+        sys.exit(f"Nombre de agente no válido: {a.agente!r} (minúsculas, cifras, - y _)")
     if not anadir_leccion(a.agente, a.texto, a.issue):
         print("Esa lección ya existe.")
     skill = generar_skill(a.agente)
@@ -2866,9 +3120,11 @@ def main() -> None:
     sp.add_parser("diagnostico").set_defaults(f=cmd_diagnostico)
     x = sp.add_parser("configurar-local")
     x.add_argument("--modelo", help="Nombre del modelo en Ollama (p. ej. qwen2.5-coder:14b). Sin él, elige uno con herramientas.")
+    x.add_argument("--agente", default="local",
+                   help="Agente local (proveedor ollama) al que se fija el modelo; solo cambia ese. Por defecto, «local».")
     x.set_defaults(f=cmd_configurar_local)
     x = sp.add_parser("probar")
-    x.add_argument("agente", choices=["claude", "local"])
+    x.add_argument("agente", help="Nombre del agente en config.json → agentes (claude, local, codex, local-plus…)")
     x.set_defaults(f=cmd_probar)
     x = sp.add_parser("una-vez")
     x.add_argument("--detener-tras", choices=PASOS[:-1], help="Solo ensayo: simula una caída tras ese paso.")
@@ -2877,7 +3133,7 @@ def main() -> None:
     sp.add_parser("parar").set_defaults(f=cmd_parar)
     sp.add_parser("estado").set_defaults(f=cmd_estado)
     x = sp.add_parser("leccion")
-    x.add_argument("agente", choices=["claude", "local"])
+    x.add_argument("agente", help="Nombre del agente (claude, local, codex, local-plus…)")
     x.add_argument("texto")
     x.add_argument("--issue", type=int)
     x.set_defaults(f=cmd_leccion)

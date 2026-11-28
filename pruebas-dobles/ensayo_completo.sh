@@ -538,6 +538,188 @@ assert issue["labels"] == ["agent:claude"], issue["labels"]
 assert logs_agente("local") == 1 and logs_agente("claude") == 1, (logs_agente("local"), logs_agente("claude"))
 PY
 
+echo "== 4 novies. Motores del equipo: Codex (autor y revisor), segundo agente local, cadena de escalado y turnos de GPU"
+grep -q '"--standalone"' coordinador.py && ok "opencode se invoca con --standalone" || mal "opencode sin --standalone"
+python3 - <<'PY' && ok "sin las claves nuevas: sin cadena, sin reservas y los agentes nuevos del ejemplo apagados" || mal "claves nuevas por defecto"
+import json
+import coordinador as C
+assert C.normalizar_cadena(None) == [] and C.normalizar_cadena("local") == [] and C.REVISION_DEFECTO["reservas"] == {}
+assert C.normalizar_cadena([" local", "local", 3, "claude"]) == ["local", "claude"]
+ej = json.load(open("config.example.json"))
+assert all(ej["agentes"][a].get("activo") is False for a in ("codex", "local-plus")), ej["agentes"]
+assert "cadena_escalado" not in ej and ej["revision"]["revisores"] == {"local": "claude", "claude": "claude"}
+a = C.args_codex(["exec", "--sandbox", "workspace-write", "--full-auto", "-c", "sandbox_mode=danger-full-access",
+                  "-c", "model=gpt-x"], solo_lectura=True)
+assert a == ["exec", "-c", "model=gpt-x", "--sandbox", "read-only", "--json", "-"], a
+assert C.args_codex(["exec", "--sandbox", "workspace-write"]) == ["exec", "--sandbox", "workspace-write", "--json", "-"]
+PY
+cp proyectos/demo/config.json "$S.demo-sin-motores.json"
+MOTORES_D="$PWD/pruebas-dobles" python3 - <<'PY'
+import json, os
+d = os.environ["MOTORES_D"]
+ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
+c["agentes"] = {
+    "codex": {"activo": True, "etiqueta": "agent:codex", "proveedor": "codex", "bin": ["python3", f"{d}/fake_codex.py"],
+              "args": ["exec", "--sandbox", "workspace-write"]},
+    "local-plus": {"activo": True, "etiqueta": "agent:local-plus", "proveedor": "ollama",
+                   "bin": ["python3", f"{d}/fake_agente.py"], "modelo": "ollama/gpt-oss:20b-32k",
+                   "args_extra": ["--auto", "--agent", "build"]}}
+c["revision"] = {"revisores": {"claude": "codex", "codex": "claude", "local-plus": "claude"}, "reservas": {"codex": "claude"}}
+c["cadena_escalado"] = ["local", "local-plus", "claude"]
+c["espera_reintento_s"] = 0
+json.dump(c, open(ruta, "w"), indent=2)
+PY
+cp proyectos/demo/config.json "$S.demo-motores.json"
+export FAKE_CODEX_LOG="$S.codex.log" FAKE_AGENTE_TURNOS="$S.turnos.log" FAKE_AGENTE_TURNO_S=0.5
+: > "$FAKE_CODEX_LOG"; : > "$FAKE_AGENTE_TURNOS"
+cat >> "$S.revlib/revlib.py" <<'PY'
+def codex(papel=None):  # invocaciones de fake_codex en esta issue
+    return [x for x in map(json.loads, open(os.environ["FAKE_CODEX_LOG"], encoding="utf-8"))
+            if x["issue"] == n and (papel is None or x["papel"] == papel)]
+def turnos():  # invocaciones de opencode (fake_agente --file) en esta issue
+    return [x for x in map(json.loads, open(os.environ["FAKE_AGENTE_TURNOS"], encoding="utf-8")) if x["issue"] == n]
+PY
+nueva_motor() {  # nueva_motor <nombre> <agente> <marcas del objetivo> → número de la issue
+  local agente=$2 n
+  [ "$2" = codex ] || [ "$2" = local-plus ] && agente=claude   # tablero.py nueva solo admite claude y local
+  n=$(python3 equipo.py demo tablero nueva "Motor $1" --agente "$agente" \
+    --objetivo "Crea el archivo docs/$1.md con un título. $3" \
+    --archivo "docs/$1.md" --criterio "existe docs/$1.md" --prueba ci --todo | sed -n 's/^#\([0-9]*\) creada.*/\1/p')
+  [ "$agente" = "$2" ] || NR="$n" AG="$2" python3 - <<'PY'
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+i = s["issues"][f"oscar/demo-app#{os.environ['NR']}"]
+i["labels"] = [f"agent:{os.environ['AG']}"]
+i["body"] = i["body"].replace("### Agente\n\nclaude", f"### Agente\n\n{os.environ['AG']}")
+json.dump(s, open(st, "w"))
+PY
+  echo "$n"
+}
+
+FAKE_OPENCODE_MODELOS=ollama/qwen2.5-coder:14b python3 equipo.py demo diagnostico > "$S.diag-motores.log" 2>&1 || true
+python3 - "$S.diag-motores.log" <<'PY' && ok "diagnostico: estado de codex sin secretos, catálogo de OpenCode, --standalone y cadena" || { cat "$S.diag-motores.log"; mal "diagnostico de los motores"; }
+import sys
+t = open(sys.argv[1], encoding="utf-8").read()
+for x in ("Motores del equipo:", "codex (codex, agent:codex, activo)", "codex-cli 0.0.0-fake", "Logged in using ChatGPT",
+          "ollama/gpt-oss:20b-32k no está en el catálogo de OpenCode", "--standalone --model ollama/gpt-oss:20b-32k",
+          "Cadena de escalado: local → local-plus → claude", "reserva si no tiene cuota: claude"):
+    assert x in t, x
+assert "c2VjcmV0bw" not in t and "firma-secreta" not in t, "diagnostico muestra el token de Codex"
+assert "⚠ Codex" not in t, "aviso de sesión con la cuenta ChatGPT bien iniciada"
+PY
+FAKE_CODEX_LOGIN=apikey python3 equipo.py demo diagnostico > "$S.diag-apikey.log" 2>&1 || true
+grep -q "Codex está con una API key" "$S.diag-apikey.log" && ! grep -q "X9X9X9X9" "$S.diag-apikey.log" \
+  && ok "diagnostico avisa de Codex con API key sin mostrarla" || mal "diagnostico: Codex con API key"
+FAKE_CODEX_LOGIN=ninguna python3 equipo.py demo diagnostico > "$S.diag-sin-sesion.log" 2>&1 || true
+grep -q "Codex sin sesión" "$S.diag-sin-sesion.log" \
+  && ok "diagnostico avisa de Codex sin sesión" || mal "diagnostico: Codex sin sesión"
+
+cp equipo.json "$S.equipo-antes.json"; cp opencode.json "$S.opencode-antes.json"
+python3 equipo.py demo configurar-local --agente local-plus --modelo qwen2.5-coder:14b > "$S.conf-local.log" 2>&1 || true
+python3 - "$S" <<'PY' && ok "configurar-local --agente local-plus solo cambia ese agente" || { cat "$S.conf-local.log"; mal "configurar-local --agente"; }
+import json, sys
+s = sys.argv[1]
+c = json.load(open("proyectos/demo/config.json"))
+assert c["agentes"]["local-plus"]["modelo"] == "ollama/qwen2.5-coder:14b", c["agentes"]
+assert json.load(open("equipo.json")) == json.load(open(s + ".equipo-antes.json")), "cambió equipo.json (el agente local)"
+assert json.load(open("opencode.json"))["model"] == json.load(open(s + ".opencode-antes.json"))["model"], "cambió opencode.json"
+PY
+python3 equipo.py demo configurar-local --agente codex --modelo qwen2.5-coder:14b > /dev/null 2>&1 \
+  && mal "configurar-local aceptó un agente que no es local" || ok "configurar-local rechaza un agente que no es local"
+cp "$S.demo-motores.json" proyectos/demo/config.json   # local-plus vuelve a su modelo (gpt-oss:20b-32k)
+
+N=$(nueva_motor motor-codex codex "[REV:ok]")
+python3 equipo.py demo una-vez > "$S.motor-codex.log" 2>&1 || true
+export LOGU="$S.motor-codex.log"
+comprobar_rev "$N" "tarea agent:codex de punta a punta (worktree → commit → PR → CI → revisión de claude)" <<'PY' || cat "$S.motor-codex.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert issue["labels"] == ["agent:codex"] and pr["head"] == f"agente/codex/issue-{n}", (issue["labels"], pr.get("head"))
+assert logs_agente("codex") == 1 and logs_agente("claude") == 0, (logs_agente("codex"), logs_agente("claude"))
+assert len(com) == 2 and all("revisor: claude" in c for c in com), com
+a = codex("autor")
+assert len(a) == 1 and a[0]["args"] == ["exec", "--sandbox", "workspace-write", "--json", "-"], a
+assert "CI en verde" in open(os.environ["LOGU"], encoding="utf-8").read()
+PY
+
+N=$(nueva_motor motor-revcodex claude "")
+python3 equipo.py demo una-vez > "$S.motor-revcodex.log" 2>&1 || true
+comprobar_rev "$N" "tarea de claude revisada por codex en solo lectura" <<'PY' || cat "$S.motor-revcodex.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review", campos
+assert len(com) == 2 and all("revisor: codex" in c for c in com), com
+r = codex("revisor")
+assert len(r) == 2 and all(x["args"][-4:] == ["--sandbox", "read-only", "--json", "-"] and "workspace-write" not in x["args"]
+                           for x in r), r
+PY
+
+N=$(nueva_motor motor-escribe claude "[CODEX:escribe]")
+python3 equipo.py demo una-vez > "$S.motor-escribe.log" 2>&1 || true
+comprobar_rev "$N" "codex escribe durante la revisión: la ronda no cuenta y se descartan los cambios" <<'PY' || cat "$S.motor-escribe.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review", campos
+assert len(com) == 3 and "no cuenta" in com[0] and "codex" in com[0] and "Revisión 1/2" in com[1], com
+assert not os.path.exists(f"proyectos/demo/worktrees/issue-{n}/escrito-por-codex.txt")
+PY
+
+N=$(nueva_motor motor-revcuota claude "[CODEX:cuota]")
+python3 equipo.py demo una-vez > "$S.motor-revcuota.log" 2>&1 || true
+comprobar_rev "$N" "codex sin cuota como revisor: revisa la reserva (claude) y queda una nota en la PR" <<'PY' || cat "$S.motor-revcuota.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+notas = [c for c in com if "nota: el revisor `codex` no tiene cuota: revisa `claude` (reserva)" in c]
+rondas = [c for c in com if "· revisor:" in c]
+assert notas and len(rondas) == 2 and all("revisor: claude" in c for c in rondas), com
+assert "no tiene cuota" in pr["body"], pr["body"]
+PY
+
+N=$(nueva_motor motor-cuota codex "[CODEX:cuota]")
+python3 equipo.py demo una-vez > "$S.motor-cuota.log" 2>&1 || true
+export LOGU="$S.motor-cuota.log"
+comprobar_rev "$N" "codex sin cuota como autor: Bloqueo «Cuota agotada» sin culpa (sin reintento ni escalado)" <<'PY' || cat "$S.motor-cuota.log"
+from revlib import *
+b = campos.get("Bloqueo") or ""
+assert campos["Estado"] == "To Do" and "Cuota agotada" in b and "intento(s)" not in b, campos
+assert issue["labels"] == ["agent:codex"] and logs_agente("codex") == 1 and logs_agente("claude") == 0, issue["labels"]
+assert pendientes("codex") == 0, pendientes("codex")
+PY
+
+N=$(nueva_fallo motor-cadena local junior)
+python3 equipo.py demo una-vez > "$S.motor-cadena.log" 2>&1 || true
+export LOGU="$S.motor-cadena.log"
+comprobar_rev "$N" "cadena_escalado local → local-plus → claude: dos fallos en cada escalón y termina claude" <<'PY' || cat "$S.motor-cadena.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert issue["labels"] == ["agent:claude"] and "### Agente\n\nclaude\n" in issue["body"], (issue["labels"], issue["body"])
+assert (logs_agente("local"), logs_agente("local-plus"), logs_agente("claude")) == (2, 2, 1), \
+    (logs_agente("local"), logs_agente("local-plus"), logs_agente("claude"))
+assert any("pasa a `local-plus` (siguiente en la cadena de escalado)" in c for c in issue["comments"]), issue["comments"]
+assert any("pasa a `claude` (senior)" in c and "`local-plus` la ha intentado 2 veces" in c for c in issue["comments"])
+assert pendientes("local") == 2 and pendientes("local-plus") == 2 and pendientes("claude") == 0
+t = [x for x in turnos() if not x["revisor"]]
+assert [x["modelo"] for x in t] == ["ollama/qwen2.5-coder:14b"] * 2 + ["ollama/gpt-oss:20b-32k"] * 2, t
+assert all(x["standalone"] for x in t), t
+PY
+
+NA=$(nueva_motor motor-turno-a local "")
+NB=$(nueva_motor motor-turno-b local-plus "")
+for i in 1 2; do python3 equipo.py demo una-vez > "$S.motor-turno-$i.log" 2>&1 || true; done
+for X in "$NA:ollama/qwen2.5-coder:14b" "$NB:ollama/gpt-oss:20b-32k"; do
+  comprobar_rev "${X%%:*}" "agente local #${X%%:*} invocado con su --model (${X#*:})" <<PY || cat "$S.motor-turno-1.log" "$S.motor-turno-2.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review", campos
+assert [x["modelo"] for x in turnos()] == ["${X#*:}"], turnos()
+PY
+done
+python3 - "$FAKE_AGENTE_TURNOS" <<'PY' && ok "max_por_proveedor: 1 → los dos agentes ollama nunca corren a la vez" || mal "dos agentes ollama a la vez"
+import json, sys
+t = sorted((json.loads(l) for l in open(sys.argv[1], encoding="utf-8")), key=lambda x: x["ini"])
+assert len({x["modelo"] for x in t}) == 2, t
+assert all(a["fin"] <= b["ini"] for a, b in zip(t, t[1:])), t
+PY
+unset FAKE_CODEX_LOG FAKE_AGENTE_TURNOS FAKE_AGENTE_TURNO_S
+cp "$S.demo-sin-motores.json" proyectos/demo/config.json
+
 echo "== 4 bis. Vista «Tablero»: columnas por Estado (sin aviso) o por otro campo (aviso con el arreglo)"
 python3 - <<'PY'
 import json, os

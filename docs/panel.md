@@ -43,6 +43,10 @@ su `config.json`. «Guardar escalado» cambia solo `escalar_fallos` y `fallos_pa
 aplica en el ciclo siguiente. Detalles en
 [Activar y ajustar el escalado](agentes-y-lecciones.md#activar-y-ajustar-el-escalado).
 
+Si el proyecto tiene `cadena_escalado`, la casilla dice «Escalar por la cadena (local → local-plus → claude)»; la
+cadena se cambia en el `config.json` ([Cadena de escalado](agentes-y-lecciones.md#cadena-de-escalado)). El selector
+de agente de «Nueva tarea» lista los agentes activos del proyecto.
+
 ## Guardar TABLERO_TOKEN
 
 Botón en cada tarjeta: pegas un token clásico en un campo de contraseña; el panel comprueba con GitHub que es

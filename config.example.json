@@ -45,6 +45,33 @@
         "--agent",
         "build"
       ]
+    },
+    "codex": {
+      "activo": false,
+      "etiqueta": "agent:codex",
+      "proveedor": "codex",
+      "bin": [
+        "codex"
+      ],
+      "args": [
+        "exec",
+        "--sandbox",
+        "workspace-write"
+      ]
+    },
+    "local-plus": {
+      "activo": false,
+      "etiqueta": "agent:local-plus",
+      "proveedor": "ollama",
+      "bin": [
+        "opencode"
+      ],
+      "modelo": "ollama/RELLENAR_CON_configurar-local_--agente_local-plus",
+      "args_extra": [
+        "--auto",
+        "--agent",
+        "build"
+      ]
     }
   },
   "pruebas": {
@@ -90,6 +117,9 @@
     "revisores": {
       "local": "claude",
       "claude": "claude"
+    },
+    "reservas": {
+      "codex": "claude"
     },
     "senior": "claude"
   }

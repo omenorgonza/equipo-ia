@@ -13,7 +13,7 @@ mantienen en la misma PR que cada mejora.
 | [Tablero](tablero.md) | Columnas, quién mueve cada tarjeta, campos, plantilla, vistas y agrupación por Estado, etiquetas `estado:*`/`prioridad:*`, crear tareas. |
 | [CI y pruebas](ci-y-pruebas.md) | La CI como juez, ensayo completo, pruebas dobles (GitHub simulado) y ensayos de aceptación. |
 | [Mantenimiento](mantenimiento.md) | Workflows de Actions, versiones, seguridad, normativa BOE, deuda técnica, despliegue y PRO. |
-| [Agentes y lecciones](agentes-y-lecciones.md) | Perfiles (Codex TL, Claude senior, local junior), revisión entre agentes, reintento y escalado, lecciones y skills. |
+| [Agentes y lecciones](agentes-y-lecciones.md) | Perfiles (Codex TL, Claude senior, local junior), revisión entre agentes, reintento y escalado, motores del equipo (Codex, segundo agente local, cadena de escalado, turnos de GPU), lecciones y skills. |
 | [Arquitectura](arquitectura.md) | Piezas (`equipo.py`, `coordinador.py`, `tablero.py`, panel, `repo-plantilla`, `proyectos/`), pasos del coordinador y diagrama del flujo. |
 | [Limitaciones](limitaciones.md) | Limitaciones conocidas y problemas ya resueltos (gh 2.45, contexto de Ollama…). |
 

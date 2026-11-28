@@ -184,8 +184,7 @@
       <label>Título <input id="t-titulo" placeholder="Añadir media de puntos"></label>
       <label>Objetivo <textarea id="t-objetivo" rows="3" placeholder="Qué hay que conseguir (por defecto, el título)"></textarea></label>
       <div class="fila">
-        <label>Agente <select id="t-agente"><option value="">(sin asignar)</option>
-          <option value="claude">claude</option><option value="local">local</option></select></label>
+        <label>Agente <select id="t-agente"><option value="">(sin asignar)</option></select></label>
         <label>Prueba <select id="t-prueba"></select></label>
         <label>Prioridad <select id="t-prioridad"><option>P0</option><option>P1</option>
           <option selected>P2</option><option>P3</option></select></label>
@@ -358,8 +357,11 @@ function htmlEscalado(p) {
   const id = esc(p.nombre), activo = e.activo ? "checked" : "", sinEscalado = e.activo ? "" : "disabled";
   const opciones = (e.opciones || [e.fallos]).map(n => `<option value="${n}" ${n === e.fallos ? "selected" : ""}>${n}</option>`).join("");
   const sucio = escPendiente[p.nombre] ? " · sin guardar" : "";
-  return `<div class="escalado" title="Si el junior falla la tarea por su culpa, se reintenta desde un worktree limpio y después pasa al senior">
-        <label class="check"><input type="checkbox" id="esc-a-${id}" ${activo} onchange="cambiarEscalado('${id}')"> Escalar al senior (${esc(e.senior)})</label>
+  // cadena_escalado (p. ej. local → local-plus → claude): cada agente pasa la tarea al siguiente, no directo al senior
+  const cadena = e.cadena || [], conCadena = cadena.length > 1;
+  const destino = conCadena ? `por la cadena (${cadena.map(esc).join(" → ")})` : `al senior (${esc(e.senior)})`;
+  return `<div class="escalado" title="Si el junior falla la tarea por su culpa, se reintenta desde un worktree limpio y después pasa al ${conCadena ? "siguiente agente de la cadena_escalado del config.json" : "senior"}">
+        <label class="check"><input type="checkbox" id="esc-a-${id}" ${activo} onchange="cambiarEscalado('${id}')"> Escalar ${destino}</label>
         <label class="check">tras <select id="esc-n-${id}" ${sinEscalado} onchange="cambiarEscalado('${id}')">${opciones}</select> fallo(s) del junior</label>
         <button class="mini" onclick="guardarEscalado('${id}')">Guardar escalado</button><span>${sucio}</span>
       </div>`;
@@ -500,6 +502,8 @@ function nuevaTarea(nombre) {
   proyectoTarea = nombre;
   const p = (datos.proyectos || []).find(x => x.nombre === nombre) || {};
   document.getElementById("t-h").textContent = `Nueva tarea · ${nombre}`;
+  document.getElementById("t-agente").innerHTML = `<option value="">(sin asignar)</option>` +
+    (p.agentes || ["claude", "local"]).map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join("");
   document.getElementById("t-prueba").innerHTML = `<option value="">(sin prueba)</option>` +
     (p.pruebas || []).map(k => `<option value="${esc(k)}">${esc(k === "ci" ? "ci (CI del proyecto)" : k)}</option>`).join("");
   document.getElementById("t-error").hidden = true;
