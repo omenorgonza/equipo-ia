@@ -151,6 +151,9 @@ Para que el trabajo de Claude lo mire otro modelo (y repartir la cuota), en `rev
   activo (el senior primero) y la nota lo explica («su reserva `claude` es el autor del cambio, así que revisa
   `local`»). Si no hay ninguno, el autor revisa su propio cambio en una sesión nueva y la nota lo dice claramente
   («⚠ `claude` revisa su propio cambio»), para que lo mires con más cuidado.
+  Si el **sustituto también se queda sin cuota**, vale su propia reserva o, si no tiene, la del revisor original, y
+  se siguen las mismas reglas sin repetir a nadie en esa ronda (p. ej. `codex` y `local` sin cuota: revisa
+  `local-plus`; si no queda nadie, el autor con la nota de autorrevisión). Solo se bloquea si no queda ninguno.
 - Codex **sin cuota como autor**: Bloqueo «Cuota agotada» sin culpa del agente (ni reintento ni escalado), como
   con Claude. `reanudar N` cuando se renueve.
 

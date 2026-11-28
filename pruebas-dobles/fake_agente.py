@@ -55,7 +55,8 @@ def responder(texto: str) -> None:
 
 if "=== REVISIÓN ENTRE AGENTES" in prompt:
     # Revisor. La marca [REV:…] del objetivo elige el guion: corrige (falla la ronda 1), escala (fallan la 1 y la 2),
-    # agota (fallan todas), edita / intenta (escribe, o lo intenta, la primera vez), ilegible (primer veredicto roto).
+    # agota (fallan todas), edita / intenta (escribe, o lo intenta, la primera vez), ilegible (primer veredicto roto),
+    # cuotaoc (el primer revisor opencode de la issue agota la cuota).
     import re as _re
     if {"acceptEdits", "--auto", "Read,Edit,Write,Glob,Grep"} & set(a):
         print("EL REVISOR TIENE PERMISOS DE ESCRITURA:", a, file=sys.stderr)
@@ -67,6 +68,10 @@ if "=== REVISIÓN ENTRE AGENTES" in prompt:
     ruta = m.group(1) if m else "src/x.py"
     marca = Path(os.environ["FAKE_GH_STATE"] + f".rev-{guion}-{issue}")
     primera = not marca.exists()
+    if guion == "cuotaoc" and "--file" in a and primera:  # el primer revisor opencode de la issue agota la cuota
+        marca.write_text("1")
+        print("Error: usage limit reached for this model", file=sys.stderr)
+        sys.exit(1)
     if guion in ("edita", "intenta", "ilegible") and primera:
         marca.write_text("1")
         if guion == "ilegible":

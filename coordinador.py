@@ -2422,7 +2422,7 @@ class Procesador:
         """Una ronda válida. Si el revisor escribe (o lo intenta) o su veredicto no se entiende, no cuenta y se repite
         una vez; a la segunda, Bloqueo."""
         minimas = self.cfg["revision"]["rondas_minimas"]
-        revisor = revisor_de(self.cfg, autor)
+        revisor = original = revisor_de(self.cfg, autor)
         sha = self._head(wt)
         diff = self.git.run("-c", "core.quotepath=false", "diff", self._base_del_diff(wt, base, con, numero), "HEAD", cwd=wt)
         if evidencia:
@@ -2454,7 +2454,7 @@ class Procesador:
                 try:
                     clasificar_fallo_agente(r)
                 except Bloqueo as b:
-                    reserva, nota = self._reserva_revisor(revisor, usados, autor)
+                    reserva, nota = self._reserva_revisor(revisor, usados, autor, original)
                     if b.causa.startswith("Cuota agotada") and reserva:
                         # revisor sin cuota: revisa la reserva (revision.reservas), sin gastar el intento de la ronda
                         log(f"#{numero}: el revisor '{revisor}' no tiene cuota; {nota.replace('`', chr(39))}")
@@ -2487,25 +2487,35 @@ class Procesador:
         raise Bloqueo(f"Revisión entre agentes: la ronda {n} no es válida ({motivo})",
                       f"Revisa el log del revisor ({revisor}) y ejecuta `reanudar {numero}`: la ronda se repite.", f"Log: {logp}")
 
-    def _reserva_revisor(self, revisor: str, usados: set[str], autor: str) -> tuple[str | None, str]:
-        """Reserva configurada para un revisor sin cuota (revision.reservas), si está activa y aún no se ha probado,
-        y la nota para la PR. Si la reserva es el propio autor, revisa otro agente activo (el senior primero); si no
-        hay ninguno, el autor se revisa a sí mismo en una sesión nueva y la nota lo dice claramente."""
+    def _reserva_revisor(self, revisor: str, usados: set[str], autor: str,
+                         original: str | None = None) -> tuple[str | None, str]:
+        """Sustituto de un revisor sin cuota y la nota para la PR. Solo si hay reserva configurada (revision.reservas)
+        para este revisor o para el revisor original de la ronda (si el primer sustituto también agota la cuota,
+        manda la reserva del original). Se prueba la reserva si está activa, no es el autor y aún no se ha usado; si
+        no, otro agente activo sin probar (el senior primero); si no queda ninguno y la reserva es el autor, el autor
+        se revisa a sí mismo en una sesión nueva y la nota lo dice claramente."""
         def libre(x) -> bool:
             ag = self.cfg["agentes"].get(x or "")
             return bool(x and x not in usados and ag and ag.get("activo", True))
-        r = (self.cfg["revision"].get("reservas") or {}).get(revisor)
-        if not libre(r):
+        reservas = self.cfg["revision"].get("reservas") or {}
+        cadena = list(dict.fromkeys(x for x in (reservas.get(revisor), reservas.get(original or revisor)) if x))
+        if not cadena:
             return None, ""
-        if r != autor:
+        r = next((x for x in cadena if x != autor and libre(x)), None)
+        if r:
             return r, f"revisa `{r}` (reserva)"
+        de = "su reserva" if reservas.get(revisor) else f"la reserva de `{original}`"
+        motivo = (f"{de} `{autor}` es el autor del cambio" if autor in cadena
+                  else f"{de} `{cadena[0]}` no está disponible (inactiva o ya probada)")
         otro = next((x for x in [self.cfg["revision"].get("senior"), *self.cfg["agentes"]] if x != autor and libre(x)),
                     None)
         if otro:
-            return otro, f"su reserva `{r}` es el autor del cambio, así que revisa `{otro}` (otro agente activo)"
-        return r, (f"su reserva `{r}` es el autor del cambio y no hay otro agente activo que pueda revisar: ⚠ **`{r}` "
-                   "revisa su propio cambio** (en una sesión nueva, sin su conversación). Conviene que Óscar lo mire "
-                   "con más cuidado")
+            return otro, f"{motivo}, así que revisa `{otro}` (otro agente activo)"
+        if autor in cadena and libre(autor):
+            return autor, (f"{motivo} y no hay otro agente activo que pueda revisar: ⚠ **`{autor}` revisa su propio "
+                           "cambio** (en una sesión nueva, sin su conversación). Conviene que Óscar lo mire con más "
+                           "cuidado")
+        return None, ""
 
     def _publicar_rondas(self, con, numero: int, rev: dict, meta: dict) -> None:
         """Comenta en la PR lo que aún no esté publicado (primero se guarda la ronda y después se publica)."""

@@ -719,6 +719,36 @@ assert notas and len(rondas) == 2 and all("revisor: local" in c for c in rondas)
 assert "no tiene cuota" in pr["body"], pr["body"]
 PY
 
+N=$(nueva_motor motor-revcuota2 claude "[CODEX:cuota] [REV:cuotaoc]")
+python3 equipo.py demo una-vez > "$S.motor-revcuota2.log" 2>&1 || true
+comprobar_rev "$N" "codex y su sustituto (local) sin cuota: manda la reserva de codex y revisa otro agente activo (local-plus)" <<'PY' || cat "$S.motor-revcuota2.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert any("nota: el revisor `local` no tiene cuota: la reserva de `codex` `claude` es el autor del cambio, así que "
+           "revisa `local-plus`" in c for c in com), com
+rondas = [c for c in com if "· revisor:" in c]
+assert len(rondas) == 2 and "revisor: local-plus" in rondas[0] and "revisor: local " in rondas[1] + " ", rondas
+PY
+
+python3 - <<'PY'
+import json
+ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
+c["agentes"]["local-plus"]["activo"] = False       # solo queda local, y se queda sin cuota en la ronda 1
+json.dump(c, open(ruta, "w"), indent=2)
+PY
+N=$(nueva_motor motor-revcuota3 claude "[CODEX:cuota] [REV:cuotaoc]")
+python3 equipo.py demo una-vez > "$S.motor-revcuota3.log" 2>&1 || true
+cp "$S.demo-motores.json" proyectos/demo/config.json
+comprobar_rev "$N" "codex y su sustituto sin cuota y nadie más activo: claude revisa su propio cambio y la nota de la PR lo dice" <<'PY' || cat "$S.motor-revcuota3.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert any("el revisor `local` no tiene cuota" in c and "no hay otro agente activo que pueda revisar" in c
+           and "revisa su propio cambio" in c for c in com), com
+rondas = [c for c in com if "· revisor:" in c]
+assert len(rondas) == 2 and "revisor: claude" in rondas[0], rondas
+assert "revisa su propio cambio" in pr["body"], pr["body"]
+PY
+
 python3 - <<'PY'
 import json
 ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
