@@ -10,6 +10,8 @@
 | **Codex** | Team Leader (TL) | Prepara las issues (Planning) con agente, archivos permitidos, criterios y prueba; revisa las PR. |
 | **Claude** (`agent:claude`) | Desarrollador senior | Claude Code con la sesión Pro. Es el `revision.senior`: revisa, recibe las tareas escaladas y puede delegar subtareas. |
 | **local** (`agent:local`) | Desarrollador junior | OpenCode + Ollama en tu PC. Sus fallos se reintentan y escalan al senior. |
+| **codex** (`agent:codex`, opcional) | Revisor y, a veces, autor | Codex CLI (`codex exec`) con tu sesión de ChatGPT. Ver [Motores del equipo](#motores-del-equipo). |
+| **local-plus** (`agent:local-plus`, opcional) | Desarrollador local para tareas medianas | Un segundo modelo de Ollama más potente, sin coste. Ver [Motores del equipo](#motores-del-equipo). |
 
 Para Codex (TL): usa `plantillas/plantilla-tarea-codex.md`, con la misma cuenta de `gh` que `autor_autorizado` y
 el repo de `config.json → repo`. Para reencolar una issue bloqueada tras corregirla, basta con volver a poner
@@ -91,6 +93,88 @@ las aplica en el ciclo siguiente, sin reiniciar.
 Los intentos gastados se guardan en el registro: tras un Bloqueo y `reanudar`, el junior solo tiene los que le
 quedaban (si ya los gastó, la tarea pasa directamente al senior). Si después de escalar devuelves la etiqueta al
 junior, manda la etiqueta: el coordinador pone el campo Agente al día y el junior empieza con todos sus intentos.
+
+## Motores del equipo
+
+Además de Claude y del agente local, el equipo admite más motores. Cada uno es una entrada de `agentes` en
+`equipo.json` (para todos los proyectos) o en el `config.json` de un proyecto; `config.example.json` trae `codex`
+y `local-plus` apagados (`"activo": false`). **Sin estas claves todo funciona como siempre**: sin cadena de
+escalado, sin reservas y sin agentes nuevos. Nada de esto guarda cuentas ni datos personales en el repo.
+
+### Añadir Codex (sesión de ChatGPT)
+
+1. Instala Codex CLI e inicia sesión con tu cuenta de ChatGPT: `codex login`. La sesión queda en tu perfil de
+   usuario (`~/.codex`), fuera del repo.
+2. En `agentes`, activa la entrada:
+
+   ```json
+   "codex": {"activo": true, "etiqueta": "agent:codex", "proveedor": "codex", "bin": ["codex"],
+             "args": ["exec", "--sandbox", "workspace-write"]}
+   ```
+
+3. `python3 equipo.py <proyecto> diagnostico` muestra la versión y el estado de la sesión (`codex login status`)
+   sin secretos: tokens y claves salen enmascarados. Avisa si no hay sesión o si Codex usa una API key (de pago).
+4. `python3 equipo.py <proyecto> probar codex` hace la prueba de aceptación.
+
+El coordinador lanza `codex exec … --json -` con el prompt por la entrada estándar y sin las variables `OPENAI_*` ni
+`CODEX_API_KEY`: siempre usa la sesión de ChatGPT, nunca la API de pago. **Como autor** (`agent:codex`) trabaja
+con el sandbox `workspace-write` en su worktree y sigue el camino de siempre: commit → PR → CI → revisión. **Como
+revisor** va con `--sandbox read-only`, sin aprobaciones automáticas ni sesiones anteriores; si aun así escribe, o
+lo intenta (un evento `file_change`), la ronda no cuenta y se descartan sus cambios.
+
+> `tablero.py nueva --agente` todavía solo acepta `claude` y `local`: para una tarea de Codex, crea la tarjeta y
+> cambia su etiqueta a `agent:codex` y su campo **Agente** a `codex`.
+
+### Revisores y reservas
+
+Para que el trabajo de Claude lo mire otro modelo (y repartir la cuota), en `revision`:
+
+```json
+"revision": {"revisores": {"claude": "codex", "local": "claude", "codex": "claude"}, "reservas": {"codex": "claude"}}
+```
+
+- `revisores`: quién revisa a cada autor (si el revisor está apagado, revisa otro agente activo, el senior primero).
+- `reservas`: si un revisor se queda **sin cuota**, revisa su reserva en esa ronda y la PR lleva una nota
+  («el revisor `codex` no tiene cuota: revisa `claude` (reserva)»); la ronda sigue contando.
+- Codex **sin cuota como autor**: Bloqueo «Cuota agotada» sin culpa del agente (ni reintento ni escalado), como
+  con Claude. `reanudar N` cuando se renueve.
+
+### Añadir un segundo agente local
+
+Para tareas medianas sin coste, un modelo de Ollama más grande (por ejemplo `gpt-oss:20b` con 32k de contexto):
+
+1. `ollama pull gpt-oss:20b` y, si su contexto por defecto es corto, una variante con `num_ctx 32768`
+   (`diagnostico` y `configurar-local` te dan los comandos).
+2. Añade el agente en `agentes` (copia `local-plus` de `config.example.json` y pon `"activo": true`).
+3. Fija su modelo: `python3 equipo.py <proyecto> configurar-local --agente local-plus --modelo gpt-oss:20b-32k:latest`.
+   Solo cambia ese agente (en el archivo donde está definido); el agente `local` y el modelo por defecto de
+   `opencode.json` no se tocan. Si `opencode.json` tiene su propio catálogo de modelos, el nuevo se añade.
+
+Cada agente local se lanza con `opencode run --standalone --model <su modelo>`: su propia ejecución, sin compartir
+sesión con el otro. Si tu OpenCode no conoce `--standalone`, pon `"standalone": false` en el agente.
+`diagnostico` avisa si el modelo de un agente local no está instalado en Ollama o no aparece en el catálogo de
+OpenCode (`opencode models`), que es lo que haría fallar al agente al arrancar.
+
+### Cadena de escalado
+
+Con varios agentes, el junior no tiene por qué saltar directamente al senior:
+
+```json
+"cadena_escalado": ["local", "local-plus", "claude"]
+```
+
+Cuando un agente de la cadena gasta sus `fallos_para_escalar` intentos, la tarea pasa al **siguiente agente activo**
+de la cadena (etiqueta, campo Agente y comentario «pasa a `local-plus` (siguiente en la cadena de escalado)»). Con el
+valor por defecto (2), dos fallos de `local` → `local-plus`; dos de `local-plus` → `claude`. Los agentes que no
+están en la cadena escalan al `senior`, como siempre. El panel muestra la cadena junto al ajuste del escalado; se
+cambia en el `config.json` y `vigilar` la relee en cada ciclo.
+
+### Turnos de GPU
+
+`max_por_proveedor` (1 por defecto) limita cuántos agentes de un **mismo proveedor** trabajan a la vez, contando a
+los revisores. Los dos agentes locales comparten el proveedor `ollama`, así que con `1` **nunca corren a la vez**
+y no se pelean por la GPU: el segundo espera su turno («esperando turno de local-plus (ollama)»). Claude, Codex y
+Ollama son proveedores distintos y sí pueden trabajar en paralelo.
 
 ## Lecciones y skills
 

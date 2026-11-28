@@ -9,8 +9,20 @@ leak = [k for k in os.environ if k.startswith(("ANTHROPIC_", "OPENAI_"))]
 if leak:
     print("FUGA DE CREDENCIALES:", leak, file=sys.stderr)
     sys.exit(3)
+if a[:1] == ["models"]:  # `opencode models`: catálogo de OpenCode (FAKE_OPENCODE_MODELOS, separados por comas)
+    print("\n".join(os.environ.get("FAKE_OPENCODE_MODELOS", "ollama/qwen2.5-coder:14b").split(",")))
+    sys.exit(0)
 if "--file" in a:
     prompt = Path(a[a.index("--file") + 1]).read_text(encoding="utf-8")
+    if os.environ.get("FAKE_AGENTE_TURNOS"):  # cada invocación de opencode: modelo, --standalone, inicio y fin
+        import time as _t
+        ini = _t.time()
+        _t.sleep(float(os.environ.get("FAKE_AGENTE_TURNO_S", "1")))
+        n_issue = (__import__("re").search(r"issue #(\d+)", prompt) or [None, "0"])[1]
+        with open(os.environ["FAKE_AGENTE_TURNOS"], "a", encoding="utf-8") as f:
+            f.write(json.dumps({"issue": int(n_issue), "modelo": a[a.index("--model") + 1] if "--model" in a else None,
+                                "standalone": "--standalone" in a, "revisor": "plan" in a,
+                                "ini": ini, "fin": _t.time()}) + "\n")
     import urllib.request
     urllib.request.urlopen(os.environ.get("FAKE_OLLAMA", "http://127.0.0.1:11999") + "/api/tags", timeout=2)
 else:

@@ -361,6 +361,11 @@ def preparar_github(repo: str, tablero: dict, simulado: bool) -> list[str]:
                "registro-mantenimiento": "BFDADC", "dependencias": "0366D6",
                "estado:backlog": "EDEDED", "estado:planning": "FBCA04", "estado:todo": "0E8A16",
                "prioridad:p0": "B60205", "prioridad:p1": "D93F0B", "prioridad:p2": "FBCA04", "prioridad:p3": "C2E0C6"}
+    # una etiqueta por agente configurado (agent:codex, agent:local-plus…), con color fijo si no es de los de siempre
+    otros = ("10A37F", "6F42C1", "1D76DB", "B4A7D6", "F9D0C4")
+    for i, ag in enumerate(a for a in (equipo_cfg().get("agentes") or {}).values()
+                           if isinstance(a, dict) and a.get("etiqueta") and a["etiqueta"] not in colores):
+        colores[ag["etiqueta"]] = otros[i % len(otros)]
     for etq, color in colores.items():
         gh("label", "create", etq, "--repo", repo, "--color", color, "--force", comprobar=False)
     if simulado:

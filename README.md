@@ -29,7 +29,8 @@ python3 equipo.py family-finance parar        # parada suave: termina la tarea e
 [guía de uso](docs/guia-uso.md) explica el día a día.
 
 **Escalado automático al senior**: actívalo y ajústalo por proyecto desde el panel o el `config.json`
-([cómo](docs/agentes-y-lecciones.md#activar-y-ajustar-el-escalado)).
+([cómo](docs/agentes-y-lecciones.md#activar-y-ajustar-el-escalado)). **Motores del equipo**: Codex como revisor
+o autor, un segundo agente local, cadena de escalado y turnos de GPU ([cómo](docs/agentes-y-lecciones.md#motores-del-equipo)).
 
 ## Documentación
 
@@ -42,7 +43,8 @@ Toda la documentación vive en [`docs/`](docs/README.md):
 - [Tablero](docs/tablero.md): columnas, quién mueve cada tarjeta, campos, vistas y etiquetas.
 - [CI y pruebas](docs/ci-y-pruebas.md): la CI como juez, ensayo completo, pruebas dobles y ensayos de aceptación.
 - [Mantenimiento](docs/mantenimiento.md): workflows de Actions, versiones, seguridad, normativa, deuda, despliegue y PRO.
-- [Agentes y lecciones](docs/agentes-y-lecciones.md): perfiles, revisión entre agentes, escalado, lecciones y skills.
+- [Agentes y lecciones](docs/agentes-y-lecciones.md): perfiles, revisión entre agentes, escalado, motores del
+  equipo, lecciones y skills.
 - [Arquitectura](docs/arquitectura.md): piezas, pasos del coordinador y diagrama del flujo Backlog → PRO.
 - [Limitaciones](docs/limitaciones.md): limitaciones conocidas y problemas resueltos.
 
