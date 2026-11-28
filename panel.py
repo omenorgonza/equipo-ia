@@ -312,6 +312,7 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
         t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
         info = t.info()
         return {"nombres": [v["name"] for v in info["views"]["nodes"]], "agrupacion": T.aviso_agrupacion(info),
+                "agente_visible": T.aviso_agente_visible(info),
                 "sin_siguiente": T.CAMPO_SIGUIENTE not in {f["name"] for f in info["fields"]["nodes"] if f}}
 
     if tb.get("numero"):
@@ -387,6 +388,9 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
             if vs.get("agrupacion"):
                 salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "url": tb.get("url"),
                                            "texto": vs["agrupacion"]})
+            if vs.get("agente_visible"):
+                salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "url": tb.get("url"),
+                                           "texto": vs["agente_visible"]})
     else:
         salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "texto": "El proyecto aún no tiene tablero",
                                    "url": None})

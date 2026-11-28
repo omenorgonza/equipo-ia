@@ -93,6 +93,15 @@ def campo_agente(cfg: dict, t: T.Tablero) -> None:
         return
     print(f"Campo {T.CAMPO_AGENTE}: {'creado' if hecho == 'creado' else 'opciones al día' if hecho else 'ya existe'} "
           f"({', '.join(activos) or 'ningún agente activo'})")
+    # GitHub deja el campo nuevo oculto en las vistas que ya existen y su API no permite mostrarlo: se avisa del paso
+    # manual (verificar y el panel lo siguen recordando hasta que se haga).
+    t._campos = None
+    try:
+        aviso = T.aviso_agente_visible(t.info())
+    except T.ErrorTablero as e:
+        aviso = f"No pude comprobar si se ve en la vista «{T.VISTA_TABLERO}» ({str(e)[:200]}): {T.ARREGLO_AGENTE_VISIBLE}"
+    if aviso:
+        print(f"  ⚠ PASO MANUAL (1 min): {aviso}")
 
 
 def cmd_crear(a) -> None:
@@ -195,6 +204,9 @@ def cmd_verificar(_a) -> None:
         if nombre not in vistas:
             problemas.append(f"Falta la vista «{nombre}» (manual, 1 min): {como}")
     aviso = T.aviso_agrupacion(info)
+    if aviso:
+        problemas.append(aviso)
+    aviso = T.aviso_agente_visible(info)
     if aviso:
         problemas.append(aviso)
     print("\nAcceso con tu identidad local:")

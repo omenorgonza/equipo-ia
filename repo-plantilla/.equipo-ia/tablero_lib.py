@@ -70,6 +70,31 @@ def aviso_agrupacion(info: dict) -> str | None:
     return f"La vista «{VISTA_TABLERO}» agrupa las columnas por {actual}, no por {CAMPO_ESTADO}: {ARREGLO_AGRUPACION}"
 
 
+ARREGLO_AGENTE_VISIBLE = (f"Vista {VISTA_TABLERO} → menú ▾ de la vista → Fields → marca {CAMPO_AGENTE} → Save "
+                          f"(se verá y se podrá cambiar en cada tarjeta, también en el móvil)")
+
+
+def campos_visibles(vista: dict) -> list[str] | None:
+    """Campos que muestra una vista (ProjectV2View.fields). None si la lectura no los trae."""
+    if not isinstance((vista or {}).get("fields"), dict):
+        return None
+    return [n["name"] for n in vista["fields"].get("nodes") or [] if n and n.get("name")]
+
+
+def aviso_agente_visible(info: dict) -> str | None:
+    """Aviso si el campo Agente existe pero la vista «Tablero» no lo muestra en sus tarjetas. GitHub añade los campos
+    nuevos ocultos en las vistas que ya existen y su API no permite elegir los campos visibles de una vista: el arreglo
+    es manual (`ARREGLO_AGENTE_VISIBLE`). None si está bien, si no hay campo o si no hay vista «Tablero»."""
+    if CAMPO_AGENTE not in {f.get("name") for f in (info.get("fields") or {}).get("nodes") or [] if f}:
+        return None
+    vista = next((v for v in (info.get("views") or {}).get("nodes") or []
+                  if v and v.get("name") == VISTA_TABLERO), None)
+    visibles = campos_visibles(vista) if vista else None
+    if visibles is None or CAMPO_AGENTE in visibles:
+        return None
+    return f"El campo {CAMPO_AGENTE} no se ve en las tarjetas de la vista «{VISTA_TABLERO}»: {ARREGLO_AGENTE_VISIBLE}"
+
+
 class Tablero:
     def __init__(self, owner: str, numero: int, owner_tipo: str = "user", gh_bin: list[str] | None = None,
                  env: dict | None = None):
@@ -114,6 +139,7 @@ class Tablero:
           fields(first:50){ nodes{ ... on ProjectV2FieldCommon{ id name dataType }
                                    ... on ProjectV2SingleSelectField{ id name dataType options{ id name } } } }
           views(first:20){ nodes{ name layout
+            fields(first:50){ nodes{ ... on ProjectV2FieldCommon{ name } } }
             verticalGroupByFields(first:5){ nodes{ ... on ProjectV2FieldCommon{ name } } } } } } } }"""
         return self.graphql(q, id=self.id)["node"]
 
@@ -541,7 +567,10 @@ def plan_agentes(items: list[dict], etiqueta_de: dict[str, str], activos: list[s
             acciones.append({**base, "tipo": "al_dia", "agente": campo})
             continue
         cambio_campo = previo is not None and campo != previo and campo != ""
-        cambio_etiqueta = previo is not None and objetivo != previo
+        # `previo` es el agente que decía la etiqueta en la última sincronización («» si no tenía uno activo). Si la
+        # etiqueta sigue diciendo ese agente y solo se ha desactivado, la etiqueta no ha cambiado: lo elegido en el
+        # campo entre medias se revierte con su comentario, no se borra en silencio.
+        cambio_etiqueta = previo is not None and objetivo != previo and etq != previo
         if not cambio_campo or cambio_etiqueta:
             acciones.append({**base, "tipo": "rellenar", "agente": objetivo})
             continue

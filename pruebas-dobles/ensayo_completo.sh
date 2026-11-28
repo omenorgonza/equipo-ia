@@ -1654,7 +1654,7 @@ def poner(n, **campos):  # simula a Óscar cambiando campos de la tarjeta en el 
 def escrituras(): return estado().get("escrituras", {}).get("Agente", 0)
 PY
 nueva_ag() {  # nueva_ag <nombre> <agente> → número (en Backlog)
-  python3 equipo.py demo tablero nueva "Agente $1" --agente "$2" --objetivo "Crea docs/agente-$1.md." \
+  python3 equipo.py demo tablero nueva "Agente $1" --agente "$2" --objetivo "Crea el archivo docs/agente-$1.md con un título." \
     --archivo "docs/agente-$1.md" --criterio "existe docs/agente-$1.md" --prueba ci | sed -n 's/^#\([0-9]*\) creada.*/\1/p'
 }
 NA=$(nueva_ag planning local); NB=$(nueva_ag etiqueta claude); NC=$(nueva_ag inactivo local); NDO=$(nueva_ag doing local)
@@ -1688,6 +1688,45 @@ for it in p["items"].values():
     assert (it["fields"].get("Agente") or None) == esperado, (i["number"], i["labels"], it["fields"])
     vistas += 1
 assert vistas >= 10, vistas
+PY
+# Visible en las tarjetas: GitHub deja el campo nuevo oculto en las vistas que ya existían y su API no deja mostrarlo.
+# `verificar` (y el panel) lo detectan leyendo los campos visibles de la vista «Tablero» y dan el paso manual.
+PYTHONPATH="$S.aglib" python3 -c "
+from aglib import *
+s = estado(); v = next(v for v in proyecto(s)['views'] if v['name'] == 'Tablero'); v['ocultos'] = ['Agente']; guardar(s)"
+python3 equipo.py demo tablero verificar > "$S.agv1.log" 2>&1 || true
+PYTHONPATH="$S.aglib" python3 -c "
+from aglib import *
+s = estado(); v = next(v for v in proyecto(s)['views'] if v['name'] == 'Tablero'); v['ocultos'] = []; guardar(s)"
+python3 equipo.py demo tablero verificar > "$S.agv2.log" 2>&1 || true
+PYTHONPATH="$S.aglib" EQUIPO_IA_PROYECTO=demo python3 - "$S.agv1.log" "$S.agv2.log" <<'PY' && ok "campo Agente oculto en la vista «Tablero»: verificar lo avisa con el paso manual; visible, sin aviso" || { cat "$S.agv1.log" "$S.agv2.log"; mal "visibilidad del campo Agente en la vista «Tablero»"; }
+import sys
+import equipo as E, tablero_lib as T
+uno, dos = (open(x, encoding="utf-8").read() for x in sys.argv[1:3])
+assert "El campo Agente no se ve en las tarjetas de la vista «Tablero»" in uno and "Fields → marca Agente" in uno, uno
+assert "no se ve en las tarjetas" not in dos, dos
+# Un campo creado después de la vista empieza oculto en ella (como en GitHub).
+info = {"fields": {"nodes": [{"name": "Agente"}]},
+        "views": {"nodes": [{"name": "Tablero", "layout": "BOARD_LAYOUT", "fields": {"nodes": [{"name": "Title"}]}}]}}
+assert T.aviso_agente_visible(info) and T.ARREGLO_AGENTE_VISIBLE in T.aviso_agente_visible(info)
+info["views"]["nodes"][0]["fields"]["nodes"].append({"name": "Agente"})
+assert T.aviso_agente_visible(info) is None
+PY
+PYTHONPATH="$S.aglib" EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "fake_gh: un campo creado con createProjectV2Field empieza oculto en las vistas existentes" || mal "fake_gh: campos nuevos en las vistas"
+import equipo as E, tablero_lib as T
+from aglib import *
+tb = E.cfg_proyecto("demo")["tablero"]
+t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
+assert t.asegurar_opciones("PruebaVisible", ["x"]) == "creado"
+v = next(v for v in proyecto(estado())["views"] if v["name"] == "Tablero")
+assert "PruebaVisible" in v.get("ocultos", []), v
+vista = next(v for v in t.info()["views"]["nodes"] if v["name"] == "Tablero")
+assert "PruebaVisible" not in T.campos_visibles(vista) and "Estado" in T.campos_visibles(vista), vista
+s = estado(); p = proyecto(s)
+p["campos_extra"] = [f for f in p["campos_extra"] if f["name"] != "PruebaVisible"]
+for v in p["views"]:
+    v["ocultos"] = [x for x in v.get("ocultos", []) if x != "PruebaVisible"]
+guardar(s)
 PY
 python3 equipo.py demo agente > "$S.ag2.log" 2>&1 || true
 [ "$(PYTHONPATH="$S.aglib" python3 -c "from aglib import *; print(escrituras())")" = "$E1" ] \
@@ -1744,20 +1783,28 @@ con = sqlite3.connect("proyectos/demo/estado/registro.db")
 con.execute("UPDATE tareas SET estado='bloqueada' WHERE estado='en_curso' AND issue<>?", (n,))
 con.commit()
 PY
-python3 equipo.py demo una-vez --detener-tras worktree > "$S.ag5.log" 2>&1 || true
-NE=$NE PYTHONPATH="$S.aglib" python3 - "$S.ag5.log" <<'PY' && ok "campo cambiado y tarjeta movida a To Do entre ciclos: la hace claude sin Bloqueo por desajuste" || { cat "$S.ag5.log"; mal "To Do tras cambiar el agente en el tablero"; }
-import os, sqlite3, sys
+# Ejecución completa (sin --detener-tras): no basta con que la reserva diga claude, claude tiene que hacer la tarea.
+python3 equipo.py demo una-vez > "$S.ag5.log" 2>&1 || true
+NE=$NE PYTHONPATH="$S.aglib" python3 - "$S.ag5.log" <<'PY' && ok "campo cambiado y tarjeta movida a To Do entre ciclos: la hace claude (invocado y con su PR) sin Bloqueo por desajuste" || { cat "$S.ag5.log"; mal "To Do tras cambiar el agente en el tablero"; }
+import os, sqlite3, subprocess, sys
 from aglib import *
 n = int(os.environ["NE"])
 f = sqlite3.connect("proyectos/demo/estado/registro.db").execute(
     "SELECT agente, estado, causa, rama FROM tareas WHERE issue=?", (n,)).fetchone()
 assert f and f[0] == "claude" and f[1] != "bloqueada" and not f[2] and f[3] == f"agente/claude/issue-{n}", f
 s = estado(); i = issue(s, n); campos = tarjeta(s, n)["fields"]
-assert not campos.get("Bloqueo") and campos["Estado"] == "Doing" and campos["Agente"] == "claude", campos
+assert not campos.get("Bloqueo") and campos["Estado"] == "Testing / Review" and campos["Agente"] == "claude", campos
 assert i["labels"] == ["agent:claude"] and "### Agente\n\nclaude\n" in i["body"], (i["labels"], i["body"])
 assert sum("Agente cambiado: `local` → `claude`" in c for c in i["comments"]) == 1, i["comments"]
 t = open(sys.argv[1], encoding="utf-8").read()
 assert "no coincide" not in t and "invocando agente 'local'" not in t, t
+assert t.count(f"#{n}: invocando agente 'claude'\n") == 1, t   # claude la ha hecho, una vez
+rama = f"agente/claude/issue-{n}"
+prs = [p for p in s["prs"] if p["repo"] == "oscar/demo-app" and p["head"].endswith(f"/issue-{n}")]
+assert len(prs) == 1 and prs[0]["head"].endswith(rama), prs
+hecho = subprocess.run(["git", "-C", os.environ["FAKE_GH_REMOTOS"] + "/demo-app.git", "show", f"{rama}:docs/agente-todo.md"],
+                       capture_output=True, text=True).stdout
+assert "Hecho por el equipo" in hecho, hecho
 # El cambio lo aplica la sincronización que hace `una-vez` antes de leer la cola: nadie lo sincronizó antes (el
 # campo y la columna cambiaron a la vez, sin `agente` por medio) y la cola ya leyó la etiqueta de claude.
 assert t.count(f"#{n}: agente cambiado en el tablero a 'claude'") == 1, t
@@ -1830,6 +1877,80 @@ cola.t.mover = mover
 assert cola.a_doing(n, "local") is False   # en Backlog no se mueve a Doing
 PY
 
+# Más carreras y fallos a medias de `aplicar_agente`:
+#  d) la etiqueta cambia a mano entre la lectura de quien decide y la escritura → gana la etiqueta, no se toca nada;
+#  e) se escribe la etiqueta y falla el cuerpo → se deshace todo, sin comentario ni comentario pendiente;
+#  f) falla también deshacer (etiqueta nueva, cuerpo viejo) y la tarjeta pasa a Doing → la sincronización no publica
+#     el «Agente cambiado» (ni uno que quedara pendiente de antes) basándose solo en la etiqueta.
+NCA=$NCA PYTHONPATH="$S.aglib" EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "cambio de agente: etiqueta cambiada entre medias gana; fallo a medias se deshace y no anuncia nada" || mal "cambio de agente con la etiqueta cambiada o un fallo a medias"
+import json, os
+import equipo as E
+from aglib import *
+C, T = E.C, E.C.T
+cfg = {**E.cfg_proyecto("demo"), "gh_bin": E.gh_bin()}
+n = int(os.environ["NCA"])
+tb = cfg["tablero"]
+t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), cfg["gh_bin"])
+rec = C.ESTADO / C.RECUERDO_AGENTES
+clave = f"oscar/demo-app#{n}"
+def ver():
+    s = estado(); i = issue(s, n)
+    return i["labels"], "### Agente\n\nlocal\n" in i["body"], tarjeta(s, n)["fields"].get("Agente"), list(i["comments"])
+def pendiente():
+    return clave in C._leer_json_dict(rec.with_name(C.COMENTARIOS_AGENTES))
+poner(n, Estado="To Do")
+assert ver() == (["agent:local"], True, "local", []), ver()
+# d)
+leida = t.item_de_issue("oscar/demo-app", n)
+s = estado(); issue(s, n)["labels"] = ["agent:codex"]; guardar(s)   # Óscar cambia la etiqueta a mano justo ahora
+try:
+    C.aplicar_agente(t, dict(leida), "claude", cfg["agentes"], cfg["gh_bin"], "el ensayo", rec, campo_decidido="local")
+    raise AssertionError("d) aplicó el agente con una etiqueta cambiada entre medias")
+except C.CambioAgenteNoPermitido as e:
+    assert "gana la etiqueta" in str(e), e
+assert ver() == (["agent:codex"], True, "local", []) and not pendiente(), ver()
+s = estado(); issue(s, n)["labels"] = ["agent:local"]; guardar(s)
+# e)
+original = C._gh_issue
+fallos = {"cuerpo": 1, "etiqueta": 0}
+def gh_con_fallos(gh_bin, *args, **k):
+    if "edit" in args and "--body-file" in args and fallos["cuerpo"]:
+        fallos["cuerpo"] -= 1; raise RuntimeError("502 simulado al editar el cuerpo")
+    if "edit" in args and "--add-label" in args and fallos["etiqueta"] \
+            and args[args.index("--add-label") + 1] == "agent:local":   # solo al deshacer (volver a local)
+        fallos["etiqueta"] -= 1; raise RuntimeError("502 simulado al deshacer la etiqueta")
+    return original(gh_bin, *args, **k)
+C._gh_issue = gh_con_fallos
+try:
+    try:
+        C.aplicar_agente(t, t.item_de_issue("oscar/demo-app", n), "claude", cfg["agentes"], cfg["gh_bin"], "el ensayo", rec)
+        raise AssertionError("e) dio por bueno un cambio con el cuerpo sin actualizar")
+    except C.CambioAgenteNoPermitido as e:
+        assert "deshecho" in str(e) and "502" in str(e), e
+    assert ver() == (["agent:local"], True, "local", []) and not pendiente(), ver()
+    # f)
+    fallos.update(cuerpo=1, etiqueta=1)
+    try:
+        C.aplicar_agente(t, t.item_de_issue("oscar/demo-app", n), "claude", cfg["agentes"], cfg["gh_bin"], "el ensayo", rec)
+        raise AssertionError("f) dio por bueno un cambio con el cuerpo sin actualizar")
+    except C.CambioAgenteNoPermitido as e:
+        assert "no pude deshacer" in str(e), e
+finally:
+    C._gh_issue = original
+etq, cuerpo_local, _, comentarios = ver()
+assert etq == ["agent:claude"] and cuerpo_local and not comentarios and not pendiente(), ver()
+# Un «Agente cambiado» que quedara pendiente de antes tampoco se publica con el cuerpo sin cambiar.
+C._comentario_pendiente(rec, t.item_de_issue("oscar/demo-app", n), "claude", "**Agente cambiado: `local` → `claude`**",
+                        tipo="cambio")
+poner(n, Estado="Doing")
+res = C.sincronizar_agentes(t, [t.item_de_issue("oscar/demo-app", n)], cfg["agentes"], cfg["gh_bin"], rec)
+assert not res["errores"], res
+etq, cuerpo_local, _, comentarios = ver()
+assert etq == ["agent:claude"] and cuerpo_local, ver()   # en Doing el cuerpo no se toca
+assert not any("Agente cambiado" in c for c in comentarios) and not pendiente(), comentarios
+s = estado(); issue(s, n)["labels"] = ["agent:local"]; tarjeta(s, n)["fields"]["Estado"] = "Backlog"; guardar(s)
+PY
+
 # El comentario falla después de cambiar la etiqueta, el cuerpo y el campo: queda pendiente y se publica en el
 # ciclo siguiente (aunque la tarjeta ya parezca al día), una sola vez.
 NA=$NA PYTHONPATH="$S.aglib" python3 -c "import os; from aglib import *; poner(int(os.environ['NA']), Agente='local')"
@@ -1851,33 +1972,65 @@ ruta = "proyectos/demo/estado/agentes-tablero-comentarios.json"
 assert not os.path.exists(ruta) or f"oscar/demo-app#{n}" not in json.load(open(ruta)), open(ruta).read()
 PY
 
-# Cerrojo de agentes entre procesos: ocupado por un proceso vivo → espera y se rinde; de un proceso muerto → se retira.
-EQUIPO_IA_PROYECTO=demo python3 - "$S.cerrojo" <<'PY' && ok "cerrojo de agentes: ocupado espera y se rinde; huérfano se retira" || mal "cerrojo de agentes"
-import json, os, subprocess, sys, time
+# Cerrojo de agentes entre procesos (bloqueo del sistema operativo): ocupado por un proceso vivo → espera y se rinde;
+# si ese proceso muere con el cerrojo cogido, el sistema lo suelta; un archivo viejo de un PID muerto no estorba; y
+# muchos procesos a la vez (también justo cuando muere quien lo tenía) nunca están dos dentro a la vez.
+EQUIPO_IA_PROYECTO=demo python3 - "$S.cerrojo" <<'PY' && ok "cerrojo de agentes: ocupado espera y se rinde; si muere quien lo tiene se suelta; nunca dos dentro" || mal "cerrojo de agentes"
+import json, os, signal, subprocess, sys, time
 from pathlib import Path
 import equipo as E
 C = E.C
 d = Path(sys.argv[1]); d.mkdir(exist_ok=True)
-vivo = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+lock = d / C.CERROJO_AGENTES
+# Un archivo de una versión anterior (PID muerto) no impide coger el cerrojo.
+lock.write_text(json.dumps({"pid": 999999}))
+with C.cerrojo_agentes(d, espera=2):
+    assert json.loads(lock.read_text())["pid"] == os.getpid()
+COGER = ("import sys, time, coordinador as C\nfrom pathlib import Path\n"
+         "with C.cerrojo_agentes(Path(sys.argv[1]), espera=5):\n    print('dentro', flush=True)\n    time.sleep(60)\n")
+vivo = subprocess.Popen([sys.executable, "-c", COGER, str(d)], stdout=subprocess.PIPE, text=True)
 try:
-    (d / C.CERROJO_AGENTES).write_text(json.dumps({"pid": vivo.pid}))
+    assert vivo.stdout.readline().strip() == "dentro"
     t0 = time.monotonic()
     try:
         with C.cerrojo_agentes(d, espera=0.6):
             raise AssertionError("entró con el cerrojo ocupado")
-    except TimeoutError:
-        pass
-    assert time.monotonic() - t0 >= 0.5 and (d / C.CERROJO_AGENTES).exists()
+    except TimeoutError as e:
+        assert str(vivo.pid) in str(e), e
+    assert time.monotonic() - t0 >= 0.5
 finally:
-    vivo.kill(); vivo.wait()
-with C.cerrojo_agentes(d, espera=2):  # el PID ya no existe: cerrojo huérfano
-    assert json.loads((d / C.CERROJO_AGENTES).read_text())["pid"] == os.getpid()
-assert not (d / C.CERROJO_AGENTES).exists()
+    vivo.send_signal(signal.SIGKILL); vivo.wait()   # muere con el cerrojo cogido: no hay nada que retirar
+t0 = time.monotonic()
+with C.cerrojo_agentes(d, espera=2):
+    assert time.monotonic() - t0 < 1.5
+# Carrera: uno lo tiene y muere mientras ocho esperan; cada uno anota entrada y salida en un registro común.
+registro = d / "registro.txt"; registro.write_text("")
+CONTAR = ("import os, sys, time, coordinador as C\nfrom pathlib import Path\n"
+          "for _ in range(3):\n"
+          "    with C.cerrojo_agentes(Path(sys.argv[1]), espera=60):\n"
+          "        open(sys.argv[2], 'a').write(f'in {os.getpid()}\\n'); time.sleep(0.03)\n"
+          "        open(sys.argv[2], 'a').write(f'out {os.getpid()}\\n')\n")
+vivo = subprocess.Popen([sys.executable, "-c", COGER, str(d)], stdout=subprocess.PIPE, text=True)
+assert vivo.stdout.readline().strip() == "dentro"
+hijos = [subprocess.Popen([sys.executable, "-c", CONTAR, str(d), str(registro)]) for _ in range(8)]
+time.sleep(0.5)
+vivo.send_signal(signal.SIGKILL); vivo.wait()
+assert all(h.wait(timeout=120) == 0 for h in hijos)
+eventos = registro.read_text().splitlines()
+assert len(eventos) == 8 * 3 * 2, len(eventos)
+for i in range(0, len(eventos), 2):  # siempre «in X» seguido de «out X»: nunca dos dentro a la vez
+    a, b = eventos[i].split(), eventos[i + 1].split()
+    assert a[0] == "in" and b[0] == "out" and a[1] == b[1], eventos[i:i + 2]
+assert lock.exists()  # el archivo no se borra nunca
 PY
 
 # Sin ningún agente activo: el campo se queda con una sola opción que no es un agente, se vacía en todas las
 # tarjetas y elegir un agente (desde una opción antigua que aún se ve en el móvil) se revierte con comentario.
 cp proyectos/demo/config.json "$S.demo-ag.json"
+# Justo antes de desactivarlos, Óscar elige claude en #NDO (Doing, etiqueta local): desactivar local no es un cambio
+# de etiqueta, así que esa elección se revierte con su comentario (no se borra en silencio).
+NDO=$NDO PYTHONPATH="$S.aglib" python3 -c "import os; from aglib import *; poner(int(os.environ['NDO']), Agente='claude')"
+NDO=$NDO PYTHONPATH="$S.aglib" python3 -c "import os; from aglib import *; print(len(issue(estado(), int(os.environ['NDO']))['comments']))" > "$S.ndo-comentarios"
 EQUIPO_IA_PROYECTO=demo python3 - <<'PY' || mal "no pude desactivar los agentes"
 import json
 import equipo as E
@@ -1888,6 +2041,17 @@ json.dump(c, open(ruta, "w"), indent=2)
 assert not E.C.agentes_activos(E.cfg_proyecto("demo")["agentes"])
 PY
 python3 equipo.py demo agente > "$S.ag9.log" 2>&1 || true
+NDO=$NDO ANTES=$(cat "$S.ndo-comentarios") PYTHONPATH="$S.aglib" python3 - <<'PY' && ok "elección hecha en Doing justo antes de desactivar al último agente: revertida con comentario" || { cat "$S.ag9.log"; mal "elección en Doing borrada sin comentario al desactivar los agentes"; }
+import os
+from aglib import *
+n = int(os.environ["NDO"])
+s = estado(); i = issue(s, n)
+assert i["labels"] == ["agent:local"] and "### Agente\n\nlocal\n" in i["body"], (i["labels"], i["body"])
+assert not tarjeta(s, n)["fields"].get("Agente"), tarjeta(s, n)   # sin agentes activos, el campo queda vacío
+nuevos = i["comments"][int(os.environ["ANTES"]):]
+assert len(nuevos) == 1 and "El agente sigue siendo `local`" in nuevos[0] and "`claude`" in nuevos[0] \
+    and "la tarjeta está en Doing" in nuevos[0], nuevos
+PY
 NC=$NC PYTHONPATH="$S.aglib" python3 -c "import os; from aglib import *; poner(int(os.environ['NC']), Agente='claude')"
 python3 equipo.py demo agente > "$S.ag10.log" 2>&1 || true
 python3 equipo.py demo agente "$NC" claude > "$S.ag11.log" 2>&1 && R11=0 || R11=$?
@@ -1922,11 +2086,12 @@ python3 equipo.py panel --puerto $PUERTO --no-abrir > "$S.panel-ag.log" 2>&1 &
 PANEL=$!
 for _ in $(seq 1 60); do curl -sf "http://127.0.0.1:$PUERTO/" | grep -q "Equipo IA" && break; sleep 0.5; done
 TOKEN=$(curl -sf "http://127.0.0.1:$PUERTO/" | sed -n 's/.*const TOKEN = "\([^"]*\)".*/\1/p')
-NB=$NB NC=$NC NDO=$NDO PUERTO=$PUERTO TOKEN=$TOKEN PYTHONPATH="$S.aglib" python3 - <<'PY' && ok "panel: agente en cada tarjeta, desplegable solo en Backlog/Planning/To Do; Doing e inactivo rechazados" || mal "panel: agente de las tarjetas"
+NA=$NA NB=$NB NC=$NC NDO=$NDO PUERTO=$PUERTO TOKEN=$TOKEN PYTHONPATH="$S.aglib" python3 - <<'PY' && ok "panel: agente en cada tarjeta (también Done), desplegable solo en Backlog/Planning/To Do; Doing e inactivo rechazados" || mal "panel: agente de las tarjetas"
 import json, os, urllib.error, urllib.request
 from aglib import *
 base = f"http://127.0.0.1:{os.environ['PUERTO']}"
-nb, nc, nd = (int(os.environ[k]) for k in ("NB", "NC", "NDO"))
+na, nb, nc, nd = (int(os.environ[k]) for k in ("NA", "NB", "NC", "NDO"))
+poner(na, Estado="Done")   # una tarjeta terminada también muestra su agente (sin desplegable)
 def demo():
     return {p["nombre"]: p for p in json.load(urllib.request.urlopen(base + "/api/estado?refrescar=1"))["proyectos"]}["demo"]
 def cambiar(cuerpo):
@@ -1943,6 +2108,8 @@ for col, ts in d["tarjetas"].items():
         assert "agente" in t and t["agente_editable"] == (col in ("Backlog", "Planning", "To Do")), (col, t)
 ts = {t["numero"]: t for g in d["tarjetas"].values() for t in g}
 assert ts[nb]["agente"] == "local" and ts[nd]["agente"] == "local" and not ts[nd]["agente_editable"], (ts[nb], ts[nd])
+assert na in {t["numero"] for t in d["tarjetas"].get("Done", [])} and ts[na]["agente"] == "local" \
+    and not ts[na]["agente_editable"], ts.get(na)
 codigo, r = cambiar({"numero": nb, "agente": "claude"})                     # Backlog: local → claude
 assert codigo == 200 and r["ok"], (codigo, r)
 s = estado(); i = issue(s, nb)
@@ -1980,7 +2147,12 @@ for trozo in trozos:
     p.feed(re.sub(r"\$\{[^}]*\}", "", trozo))
 assert not p.pila, p.pila
 assert {"label", "select", "option", "span"} <= p.vistos, p.vistos
-assert "${htmlAgente(p, t)}" in h and '"Backlog"].flatMap' in h
+assert "${htmlAgente(p, t)}" in h
+# La lista pinta todas las columnas que devuelve la API (Done y PRO incluidas, y cualquier otra), con su agente.
+lista = re.search(r"const LISTA = \[(.*?)\];", h).group(1)
+assert [x.strip().strip('"') for x in lista.split(",")] == ["Testing / Review", "Doing", "To Do", "Planning", "Backlog",
+                                                             "Done", "PRO"], lista
+assert "LISTA.concat(Object.keys(p.tarjetas" in h and "columnas.flatMap(" in h
 PY
 
 echo "== 6. Compilación de todo el código"

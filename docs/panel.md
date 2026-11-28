@@ -50,8 +50,8 @@ mismos que admite `tablero.py nueva --agente`.
 
 ## Agente de cada tarjeta
 
-La lista de tareas de cada proyecto (Backlog, Planning, To Do, Doing y Review) muestra el agente asignado según
-su etiqueta `agent:*`. En **Backlog, Planning y To Do** es un desplegable con los agentes activos: al elegir otro,
+La lista de tareas de cada proyecto (todas sus columnas: Review, Doing, To Do, Planning, Backlog, Done y PRO)
+muestra el agente asignado según su etiqueta `agent:*`. En **Backlog, Planning y To Do** es un desplegable con los agentes activos: al elegir otro,
 el panel ejecuta `coordinador.py agente N <agente>`, que cambia la etiqueta, el campo «Agente» del cuerpo de la
 issue y el del tablero, y deja un comentario. En Doing o después es solo texto, y un agente inactivo no aparece
 como opción (el panel y el coordinador lo rechazan). API: `POST /api/proyecto/<nombre>/agente` con

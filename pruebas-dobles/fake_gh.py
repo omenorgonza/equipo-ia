@@ -178,9 +178,12 @@ def usuario_del_token():
     return {"login": partes[2]}
 
 
-def vista_json(v):
-    """Vista guardada en el estado → ProjectV2View. `agrupar` (lista de nombres de campo) simula Column by."""
+def vista_json(v, p=None):
+    """Vista guardada en el estado → ProjectV2View. `agrupar` (lista de nombres de campo) simula Column by; `ocultos`,
+    los campos que la vista no muestra (como en GitHub, un campo creado después de la vista empieza oculto en ella)."""
+    visibles = [f["name"] for f in campos_proyecto(p)] if p is not None else []
     return {"name": v["name"], "layout": v["layout"],
+            "fields": {"nodes": [{"name": n} for n in visibles if n not in v.get("ocultos", [])]},
             "verticalGroupByFields": {"nodes": [{"name": n} for n in v.get("agrupar", [])]}}
 
 
@@ -213,11 +216,13 @@ def graphql(s, a):
         f = {"id": f"F_{v['n']}~{v['p'].split('_')[1]}", "name": v["n"], "dataType": "SINGLE_SELECT",
              "options": [{"id": "O_" + o, "name": o} for o in opciones_de(q)]}
         p.setdefault("campos_extra", []).append(f)
+        for x in p.get("views", []):
+            x.setdefault("ocultos", []).append(f["name"])
         anotar_escritura(s, "campo:" + f["name"])
         return {"createProjectV2Field": {"projectV2Field": {"id": f["id"]}}}
     if "fields(first" in q:
         return {"node": {"title": p["title"], "url": p["url"], "public": False,
-                         "fields": {"nodes": campos_proyecto(p)}, "views": {"nodes": [vista_json(x) for x in p.get("views", [])]}}}
+                         "fields": {"nodes": campos_proyecto(p)}, "views": {"nodes": [vista_json(x, p) for x in p.get("views", [])]}}}
     if "items(first" in q:
         nodes = []
         for iid, it in p["items"].items():

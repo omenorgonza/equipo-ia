@@ -248,6 +248,7 @@
 const TOKEN = "__TOKEN__";
 const COLS = ["Backlog","Planning","To Do","Doing","Testing / Review","Done","PRO"];
 const CORTO = {"Testing / Review": "Review"};
+const LISTA = ["Testing / Review", "Doing", "To Do", "Planning", "Backlog", "Done", "PRO"];  // orden de la lista de tarjetas
 const PALETA = ["azul","verde","naranja","violeta","turquesa","rosa","ambar","rojo"];  // = PALETA de equipo.py
 let datos = null, orden = [];
 
@@ -317,7 +318,9 @@ function pintar() {
   document.getElementById("proyectos").innerHTML = ps.map(p => {
     const altas = p.atencion.filter(a => a.nivel === "alta").length;
     const rd = (p.repos[0] || {}).readme || {};
-    const activas = ["Testing / Review", "Doing", "To Do", "Planning", "Backlog"].flatMap(e => (p.tarjetas[e] || []).map(t => ({...t, e})));
+    // Todas las tarjetas que devuelve la API (también Done, PRO y sin estado), cada una con su agente asignado.
+    const columnas = LISTA.concat(Object.keys(p.tarjetas || {}).filter(e => !LISTA.includes(e)));
+    const activas = columnas.flatMap(e => ((p.tarjetas || {})[e] || []).map(t => ({...t, e})));
     return `<article class="card c-${esc(p.color)} ${altas ? "foco" : ""}">
       <div class="top"><h3>${esc(p.nombre)}</h3>
         <span class="pill ${p.activo ? "on" : "off"}">${p.activo ? "Equipo trabajando" : "Equipo parado"}</span></div>
@@ -339,7 +342,7 @@ function pintar() {
           <button class="mini" onclick="verProgreso('${p.nombre}', ${pg.numero})">Ver progreso</button>
           ${pg.ultima_linea ? `<span class="ult" title="${esc(pg.ultima_linea)}">${esc(pg.ultima_linea)}</span>` : ""}
         </div>`).join("")}</div>` : ""}
-      ${activas.length ? `<details data-p="${esc(p.nombre)}" ${abiertos.has(p.nombre) ? "open" : ""}><summary>${activas.length} tarea(s) en curso, pendientes, en Planning o en Backlog</summary>
+      ${activas.length ? `<details data-p="${esc(p.nombre)}" ${abiertos.has(p.nombre) ? "open" : ""}><summary>${activas.length} tarea(s) del tablero, con su agente (en curso, pendientes, Planning, Backlog, Done y PRO)</summary>
         ${activas.map(t => `<div class="tarj"><span>${esc(CORTO[t.e] || t.e)}</span>
           <a href="${esc(t.pr || t.url)}" target="_blank" rel="noopener">#${t.numero} ${esc(t.titulo)}</a>
           <span class="pr">${esc((t.prioridad || "").slice(0,2))}</span> ${htmlAgente(p, t)}
