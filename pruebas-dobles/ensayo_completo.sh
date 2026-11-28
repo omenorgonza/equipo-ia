@@ -1758,6 +1758,76 @@ assert i["labels"] == ["agent:claude"] and "### Agente\n\nclaude\n" in i["body"]
 assert sum("Agente cambiado: `local` → `claude`" in c for c in i["comments"]) == 1, i["comments"]
 t = open(sys.argv[1], encoding="utf-8").read()
 assert "no coincide" not in t and "invocando agente 'local'" not in t, t
+# El cambio lo aplica la sincronización que hace `una-vez` antes de leer la cola: nadie lo sincronizó antes (el
+# campo y la columna cambiaron a la vez, sin `agente` por medio) y la cola ya leyó la etiqueta de claude.
+assert t.count(f"#{n}: agente cambiado en el tablero a 'claude'") == 1, t
+PY
+
+# Carrera con Doing, sin cerrojo de por medio (alguien mueve la tarjeta mientras se cambia su agente):
+#  a) leída en To Do y ya en Doing al escribir → no se toca nada;
+#  b) pasa a Doing justo después de escribir la etiqueta → se deshace todo (etiqueta, cuerpo, campo, sin comentario);
+#  c) el coordinador, al mover a Doing, ve que la etiqueta ya no es la del agente que leyó → vuelve a To Do sin lanzar.
+NCA=$(nueva_ag carrera local)
+python3 equipo.py demo agente > /dev/null 2>&1 || true
+NCA=$NCA PYTHONPATH="$S.aglib" EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "carrera con Doing: el cambio de agente se valida al escribir y se deshace; el coordinador no lanza con otro agente" || mal "carrera entre cambio de agente y paso a Doing"
+import json, os
+import equipo as E
+from aglib import *
+C, T = E.C, E.C.T
+cfg = {**E.cfg_proyecto("demo"), "gh_bin": E.gh_bin()}
+n = int(os.environ["NCA"])
+poner(n, Estado="To Do")
+tb = cfg["tablero"]
+t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), cfg["gh_bin"])
+rec = C.ESTADO / C.RECUERDO_AGENTES
+foto = lambda: json.dumps([issue(estado(), n), tarjeta(estado(), n)["fields"]], sort_keys=True)
+# a)
+leida = t.item_de_issue("oscar/demo-app", n)
+assert leida["estado"] == "To Do" and leida["agente_campo"] == "local", leida
+poner(n, Estado="Doing")
+antes = foto()
+try:
+    C.aplicar_agente(t, dict(leida), "claude", cfg["agentes"], cfg["gh_bin"], "el ensayo", rec)
+    raise AssertionError("a) cambió el agente de una tarjeta en Doing")
+except C.CambioAgenteNoPermitido as e:
+    assert "Doing" in str(e), e
+assert foto() == antes, "a) tocó la tarjeta"
+# b)
+poner(n, Estado="To Do")
+antes = foto()
+original = C._poner_agente
+def poner_y_mover(*a, **k):
+    original(*a, **k)
+    poner(n, Estado="Doing")   # el coordinador (u otra persona) la mueve justo ahora
+C._poner_agente = poner_y_mover
+try:
+    C.aplicar_agente(t, t.item_de_issue("oscar/demo-app", n), "claude", cfg["agentes"], cfg["gh_bin"], "el ensayo", rec)
+    raise AssertionError("b) dejó el cambio en una tarjeta que pasó a Doing")
+except C.CambioAgenteNoPermitido as e:
+    assert "deshecho" in str(e), e
+finally:
+    C._poner_agente = original
+i, campos = issue(estado(), n), tarjeta(estado(), n)["fields"]
+assert i["labels"] == ["agent:local"] and "### Agente\n\nlocal\n" in i["body"] and campos["Agente"] == "local", (i, campos)
+assert not i["comments"], i["comments"]
+pend = C._leer_json_dict(rec.with_name(C.COMENTARIOS_AGENTES))
+assert f"oscar/demo-app#{n}" not in json.dumps(pend), pend
+# c)
+poner(n, Estado="To Do")
+cola = C.ColaTablero(cfg, None)
+s = estado(); issue(s, n)["labels"] = ["agent:claude"]; guardar(s)   # cambiada tras leer la cola (que leyó local)
+assert not cola.a_doing(n, "local") and tarjeta(estado(), n)["fields"]["Estado"] == "To Do"
+s = estado(); issue(s, n)["labels"] = ["agent:local"]; guardar(s)
+mover = cola.t.mover
+def mover_y_cambiar(item_id, destino):
+    mover(item_id, destino)
+    if destino == "Doing":
+        s = estado(); issue(s, n)["labels"] = ["agent:claude"]; guardar(s)
+cola.t.mover = mover_y_cambiar
+assert not cola.a_doing(n, "local") and tarjeta(estado(), n)["fields"]["Estado"] == "To Do", tarjeta(estado(), n)
+s = estado(); issue(s, n)["labels"] = ["agent:local"]; tarjeta(s, n)["fields"]["Estado"] = "Backlog"; guardar(s)
+cola.t.mover = mover
+assert cola.a_doing(n, "local") is False   # en Backlog no se mueve a Doing
 PY
 
 # El comentario falla después de cambiar la etiqueta, el cuerpo y el campo: queda pendiente y se publica en el
@@ -1812,8 +1882,8 @@ EQUIPO_IA_PROYECTO=demo python3 - <<'PY' || mal "no pude desactivar los agentes"
 import json
 import equipo as E
 ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
-for n in E.C.agentes_activos(E.cfg_proyecto("demo")["agentes"]):
-    c["agentes"].setdefault(n, {})["activo"] = False
+for n in E.C.agentes_activos(E.cfg_proyecto("demo")["agentes"]):  # los agentes suelen venir de equipo.json
+    c.setdefault("agentes", {}).setdefault(n, {})["activo"] = False
 json.dump(c, open(ruta, "w"), indent=2)
 assert not E.C.agentes_activos(E.cfg_proyecto("demo")["agentes"])
 PY

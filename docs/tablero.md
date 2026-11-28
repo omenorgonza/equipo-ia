@@ -70,11 +70,16 @@ Detalles que evitan sorpresas:
   (`estado/agentes-tablero.lock`). El coordinador lo mantiene desde la sincronización del ciclo hasta mover a Doing
   las tareas que elige, y el panel lee y valida la tarjeta con el cerrojo puesto: un cambio iniciado en To Do no
   puede tocar una tarea que el coordinador ya ha pasado a Doing (el panel espera un momento o avisa de que lo
-  intentes otra vez).
+  intentes otra vez). Aunque alguien mueva la tarjeta sin el cerrojo, el estado se vuelve a leer justo antes de
+  escribir y otra vez después: si la tarjeta ya pasó a Doing, el cambio se deshace (etiqueta, cuerpo y campo). Y
+  el coordinador, ya en Doing, comprueba que la etiqueta sigue siendo la del agente elegido; si no, la devuelve
+  a To Do sin lanzar trabajo.
 - **El comentario no se pierde**: se anota en `estado/agentes-tablero-comentarios.json` antes de escribir nada; si
-  GitHub falla al publicarlo, el ciclo siguiente lo publica (una vez) mientras la etiqueta siga diciendo ese agente.
+  GitHub falla al publicarlo, el ciclo siguiente lo publica (una vez) mientras la etiqueta siga diciendo ese agente,
+  aunque la tarjeta ya parezca al día y aunque falle el ajuste de las opciones del campo.
 - **Sin agentes activos**: el campo se queda con una sola opción, `sin-agente-activo` (GitHub no admite un campo de
-  selección vacío), se vacía en todas las tarjetas y lo que se elija se deshace con un comentario.
+  selección vacío), se vacía en todas las tarjetas y lo que se elija se deshace con un comentario. Las opciones se
+  ajustan siempre antes de revisar las tarjetas, también al desactivar el último agente.
 
 ## Plantilla del tablero
 

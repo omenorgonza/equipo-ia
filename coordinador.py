@@ -939,7 +939,7 @@ class ColaEtiquetas:
     def candidatos(self) -> list[dict]:
         return self.gh.issues_ready()
 
-    def a_doing(self, numero: int) -> bool:
+    def a_doing(self, numero: int, agente: str | None = None) -> bool:  # noqa: ARG002 — sin tablero no hay campo
         self.gh.etiquetas(numero, "running", list(ETQ_ESTADO))
         return True
 
@@ -985,10 +985,17 @@ class ColaTablero:
         items.sort(key=lambda it: (T.rango_prioridad(it["prioridad"]), it["creada"], it["numero"]))
         return [self.a_issue(it) for it in items]
 
-    def a_doing(self, numero: int) -> bool:
-        """Comprueba de nuevo la elegibilidad y mueve a Doing; verifica la escritura releyendo."""
+    def a_doing(self, numero: int, agente: str | None = None) -> bool:
+        """Comprueba de nuevo la elegibilidad y mueve a Doing; verifica la escritura releyendo. Con `agente` (el de
+        la etiqueta que leyó la cola), comprueba también, ya en Doing, que la etiqueta sigue diciendo ese agente: si
+        alguien la cambió mientras se movía la tarjeta, vuelve a To Do y no se lanza trabajo (el ciclo siguiente la
+        coge con el agente nuevo). Junto con la relectura de `aplicar_agente`, ninguna tarea en Doing queda asignada a
+        un agente distinto del que la hace."""
         it = self._item(numero)
         if not it or it["bloqueo"] or it["estado"] not in (T.TODO, T.DOING):
+            return False
+        if agente and agente_de_etiquetas(self.cfg, set(it["etiquetas"])) != agente:
+            log(f"#{numero}: su agente ha cambiado desde que leí la cola; la dejo para el ciclo siguiente")
             return False
         try:
             if it["estado"] != T.DOING:
@@ -996,7 +1003,16 @@ class ColaTablero:
         except T.ErrorTablero as e:
             log(f"#{numero}: fallo al mover a Doing ({e}); reconcilio antes de lanzar")
         it = self._item(numero)
-        return bool(it) and it["estado"] == T.DOING and not it["bloqueo"]
+        if not it or it["estado"] != T.DOING or it["bloqueo"]:
+            return False
+        if agente and agente_de_etiquetas(self.cfg, set(it["etiquetas"])) != agente:
+            log(f"#{numero}: su agente cambió mientras la pasaba a Doing; vuelve a To Do y no lanzo trabajo")
+            try:
+                self.t.mover(it["item_id"], T.TODO)
+            except T.ErrorTablero as e:
+                log(f"#{numero}: no pude devolverla a To Do ({e})")
+            return False
+        return True
 
     def a_review(self, numero: int) -> None:
         it = self._item(numero)
@@ -1090,7 +1106,8 @@ def _escribir_json(p: Path, d: dict) -> None:
 
 
 def _anotar_recuerdo(p: Path, cambios: dict[str, str]) -> None:
-    """Mezcla `cambios` en el recuerdo (cerrojo + escritura atómica: el panel y el coordinador no se pisan)."""
+    """Mezcla `cambios` en el recuerdo (escritura atómica; `_recuerdo_lock` solo separa hilos de un mismo proceso:
+    entre procesos, panel y coordinador lo escriben siempre con `cerrojo_agentes`)."""
     if not cambios:
         return
     with _recuerdo_lock:
@@ -1177,14 +1194,58 @@ def aplicar_agente(t: T.Tablero, it: dict, nuevo: str, agentes: dict, gh_bin: li
     """Pasa la tarjeta a `nuevo`: etiqueta (quita las de los demás agentes), campo «### Agente» del cuerpo, campo
     Agente del tablero y un comentario. Cada paso se puede repetir sin efectos raros; el comentario queda anotado
     como pendiente hasta publicarse (`_comentario_pendiente`). Actualiza `it` en memoria. Llamar con
-    `cerrojo_agentes` y con `it` leído dentro de él."""
+    `cerrojo_agentes`.
+
+    El estado se valida contra el tablero en el momento de escribir, no contra la lectura de quien llama: la tarjeta
+    se relee justo antes de la primera escritura (si ya no está abierta en Backlog, Planning o To Do, no se toca
+    nada) y otra vez tras escribir; si entre medias alguien la ha pasado a Doing (o más allá), se deshace todo y se
+    lanza `CambioAgenteNoPermitido`. Con `ColaTablero.a_doing`, que tras mover a Doing comprueba que la etiqueta
+    sigue siendo la del agente elegido, ninguna tarea en Doing acaba con un agente distinto del que la está haciendo,
+    aunque quien la mueva no respete el cerrojo."""
     repo, n = it["repo"], it["numero"]
+    fresco = t.item_de_issue(repo, n)
+    if not fresco:
+        raise CambioAgenteNoPermitido(f"#{n} ya no está en el tablero")
+    it.update(fresco)
+    if not it["abierta"] or it["estado"] not in T.AGENTE_EDITABLE:
+        raise CambioAgenteNoPermitido(
+            f"#{n} está en {it['estado'] or 'sin estado'}{'' if it['abierta'] else ' (cerrada)'}: el agente solo se "
+            f"cambia en {', '.join(T.AGENTE_EDITABLE)}")
     etiqueta_de = {a: c["etiqueta"] for a, c in agentes.items() if isinstance(c, dict) and c.get("etiqueta")}
-    antes = T.agente_por_etiquetas(it.get("etiquetas"), etiqueta_de)
+    previo = {"etiquetas": list(it.get("etiquetas") or []), "cuerpo": it.get("cuerpo") or "",
+              "agente_campo": it.get("agente_campo") or ""}
+    antes = T.agente_por_etiquetas(previo["etiquetas"], etiqueta_de)
     texto = (f"**Agente cambiado: `{antes or 'sin agente'}` → `{nuevo}` 🤝**\n\nDesde {origen}. Ya están al día la "
              f"etiqueta `{etiqueta_de[nuevo]}` y el campo Agente de la issue; cuando la tarjeta esté en To Do, la hará "
              f"`{nuevo}`.")
+    clave = T.clave_tarjeta(it)
+    # Un comentario de un cambio anterior aún sin publicar se recupera si este cambio se deshace (si falla a medias,
+    # la sincronización siguiente descarta el que no coincida con la etiqueta).
+    pendiente_previo = _leer_json_dict(recuerdo.with_name(COMENTARIOS_AGENTES)).get(clave)
     _comentario_pendiente(recuerdo, it, nuevo, texto)
+    _poner_agente(t, it, nuevo, etiqueta_de, gh_bin)
+    despues = t.item_de_issue(repo, n)
+    if not despues or not despues["abierta"] or despues["estado"] not in T.AGENTE_EDITABLE:
+        estado = (despues or {}).get("estado") or "fuera del tablero"
+        if isinstance(pendiente_previo, dict) and isinstance(pendiente_previo.get("texto"), str):
+            _comentario_pendiente(recuerdo, it, pendiente_previo.get("agente") or "", pendiente_previo["texto"])
+        else:
+            _quitar_comentario(recuerdo, clave)
+        try:  # deshacer: etiqueta, cuerpo y campo como estaban
+            _restaurar_agente(t, it, previo, etiqueta_de, gh_bin)
+        except Exception as e:  # noqa: BLE001
+            raise CambioAgenteNoPermitido(f"#{n} pasó a {estado} mientras cambiaba su agente y no pude deshacer el "
+                                          f"cambio ({str(e)[:200]})") from e
+        raise CambioAgenteNoPermitido(f"#{n} pasó a {estado} mientras cambiaba su agente: cambio deshecho")
+    _publicar_comentario(gh_bin, recuerdo, it, texto)
+
+
+class CambioAgenteNoPermitido(RuntimeError):
+    """La tarjeta no admite el cambio de agente (no está abierta en Backlog, Planning o To Do al escribir)."""
+
+
+def _poner_agente(t: T.Tablero, it: dict, nuevo: str, etiqueta_de: dict, gh_bin: list[str]) -> None:
+    repo, n = it["repo"], it["numero"]
     sobran = [e for a, e in etiqueta_de.items() if a != nuevo and e in it.get("etiquetas", [])]
     if etiqueta_de[nuevo] not in it.get("etiquetas", []) or sobran:
         args = ["issue", "edit", str(n), "--repo", repo, "--add-label", etiqueta_de[nuevo]]
@@ -1201,7 +1262,32 @@ def aplicar_agente(t: T.Tablero, it: dict, nuevo: str, agentes: dict, gh_bin: li
     if T.CAMPO_AGENTE in t.campos and it.get("agente_campo") != nuevo:
         t.poner_opcion(it["item_id"], T.CAMPO_AGENTE, nuevo)
         it["agente_campo"] = nuevo
-    _publicar_comentario(gh_bin, recuerdo, it, texto)
+
+
+def _restaurar_agente(t: T.Tablero, it: dict, previo: dict, etiqueta_de: dict, gh_bin: list[str]) -> None:
+    """Deja etiquetas de agente, cuerpo y campo Agente como en `previo` (deshace `_poner_agente`)."""
+    repo, n = it["repo"], it["numero"]
+    de_agente = set(etiqueta_de.values())
+    quitar = [e for e in it.get("etiquetas", []) if e in de_agente and e not in previo["etiquetas"]]
+    poner = [e for e in previo["etiquetas"] if e in de_agente and e not in it.get("etiquetas", [])]
+    if quitar or poner:
+        args = ["issue", "edit", str(n), "--repo", repo]
+        for e in poner:
+            args += ["--add-label", e]
+        for e in quitar:
+            args += ["--remove-label", e]
+        _gh_issue(gh_bin, *args)
+        it["etiquetas"] = [e for e in it.get("etiquetas", []) if e not in quitar] + poner
+    if (it.get("cuerpo") or "") != previo["cuerpo"]:
+        _gh_issue(gh_bin, "issue", "edit", str(n), "--repo", repo, "--body-file", "-", stdin_text=previo["cuerpo"])
+        it["cuerpo"] = previo["cuerpo"]
+    if T.CAMPO_AGENTE in t.campos and (it.get("agente_campo") or "") != previo["agente_campo"]:
+        if previo["agente_campo"] and any(o["name"] == previo["agente_campo"]
+                                          for o in t.campos[T.CAMPO_AGENTE].get("options") or []):
+            t.poner_opcion(it["item_id"], T.CAMPO_AGENTE, previo["agente_campo"])
+        else:
+            t.poner_texto(it["item_id"], T.CAMPO_AGENTE, "")
+        it["agente_campo"] = previo["agente_campo"]
 
 
 def _reintentar_comentarios(items: list[dict], etiqueta_de: dict, gh_bin: list[str], recuerdo: Path,
@@ -1236,17 +1322,38 @@ def sincronizar_agentes(t: T.Tablero, items: list[dict], agentes: dict, gh_bin: 
     avisar = avisar or log
     activos = agentes_activos(agentes)
     res = {"escritas": 0, "aplicadas": [], "revertidas": [], "errores": []}
-    if not activos and T.CAMPO_AGENTE not in t.campos:
-        return res  # sin agentes activos no se crea el campo; si ya existe, se vacía y se revierte lo que se elija
-    if t.asegurar_opciones(T.CAMPO_AGENTE, activos or [T.SIN_AGENTE]):
-        avisar(f"Campo {T.CAMPO_AGENTE} del tablero: opciones al día ({', '.join(activos) or 'ningún agente activo'})")
     etiqueta_de = {a: c["etiqueta"] for a, c in agentes.items() if isinstance(c, dict) and c.get("etiqueta")}
     permitidos = {r.lower() for r in repos} if repos else None
     propios = [it for it in items if permitidos is None or it["repo"].lower() in permitidos]
-    cambios: dict[str, str] = {}
     fallidas: set[str] = set()
+    try:
+        _sincronizar_campo(t, propios, agentes, activos, etiqueta_de, gh_bin, recuerdo, res, fallidas, avisar)
+    except Exception as e:  # noqa: BLE001 — p. ej. GitHub rechaza cambiar las opciones del campo
+        res["errores"].append(f"campo {T.CAMPO_AGENTE}: {str(e)[:200]}")
+    # Pase lo que pase con el campo, los comentarios de cambio de agente que quedaron sin publicar se publican: un
+    # cambio ya aplicado (etiqueta, cuerpo y campo al día) nunca se queda sin su comentario.
+    _reintentar_comentarios(propios, etiqueta_de, gh_bin, recuerdo, fallidas, res, avisar)
+    return res
+
+
+def _sincronizar_campo(t: T.Tablero, propios: list[dict], agentes: dict, activos: list[str],
+                       etiqueta_de: dict, gh_bin: list[str], recuerdo: Path, res: dict, fallidas: set[str],
+                       avisar) -> None:
+    if not activos and T.CAMPO_AGENTE not in t.campos:
+        return  # sin agentes activos no se crea el campo (no hay nada que elegir ni que revertir)
+    # Sin agentes activos, el campo existente se queda con una sola opción que no es un agente: lo que se elija se
+    # revierte. Las opciones se ajustan SIEMPRE antes de mirar las tarjetas.
+    frescos: dict[str, str] | None = None
+    if t.asegurar_opciones(T.CAMPO_AGENTE, activos or [T.SIN_AGENTE]):
+        avisar(f"Campo {T.CAMPO_AGENTE} del tablero: opciones al día ({', '.join(activos) or 'ningún agente activo'})")
+        # Cambiar las opciones puede vaciar el campo en GitHub. El plan se hace con la lectura anterior (así se
+        # revierte con comentario lo que alguien eligiera), pero lo que se escribe se compara con el valor real.
+        frescos = {T.clave_tarjeta(x): x.get("agente_campo") or "" for x in t.items()}
+    cambios: dict[str, str] = {}
     for ac in T.plan_agentes(propios, etiqueta_de, activos, _leer_recuerdo(recuerdo)):
         it, clave = ac["it"], T.clave_tarjeta(ac["it"])
+        if frescos is not None and ac["tipo"] == "al_dia" and frescos.get(clave, ac["agente"]) != ac["agente"]:
+            ac = {**ac, "tipo": "rellenar"}
         try:
             if ac["tipo"] == "aplicar":
                 aplicar_agente(t, it, ac["agente"], agentes, gh_bin, "el campo Agente del tablero", recuerdo)
@@ -1285,8 +1392,6 @@ def sincronizar_agentes(t: T.Tablero, items: list[dict], agentes: dict, gh_bin: 
             fallidas.add(clave)
             res["errores"].append(f"#{it['numero']}: {str(e)[:200]}")
     _anotar_recuerdo(recuerdo, cambios)
-    _reintentar_comentarios(propios, etiqueta_de, gh_bin, recuerdo, fallidas, res, avisar)
-    return res
 
 
 def sincronizar_agentes_cfg(cfg: dict) -> dict | None:
@@ -3005,7 +3110,9 @@ def procesar_cola(cfg: dict, detener_tras: str | None = None) -> dict:
     # Antes de leer la cola: un cambio de agente hecho en el tablero (campo Agente) ya cambia la etiqueta, así la
     # tarea la coge el agente nuevo sin Bloqueo por desajuste entre el campo y la etiqueta. El cerrojo de agentes se
     # mantiene desde esa sincronización hasta mover a Doing lo elegido: el panel no puede cambiar el agente de una
-    # tarjeta entre la lectura de la cola y su paso a Doing (ni después, porque valida el estado con el cerrojo).
+    # tarjeta entre la lectura de la cola y su paso a Doing. Además, sin depender del cerrojo: `aplicar_agente` valida
+    # el estado releyendo la tarjeta al escribir (y deshace si pasó a Doing) y `a_doing` comprueba la etiqueta ya en
+    # Doing, así que un cambio iniciado en To Do nunca reasigna una tarea que ya está en Doing.
     cerrojo = contextlib.ExitStack()
     if cola.nombre == "tablero":
         try:
@@ -3077,7 +3184,7 @@ def _procesar_cola(cfg: dict, proc: "Procesador", cola, cerrojo: contextlib.Exit
             actualizar(con, cfg["repo"], n, paso="worktree")
         # Reserva hecha: comprobar de nuevo la elegibilidad y mover a Doing ANTES de invocar al agente.
         try:
-            confirmado = cola.a_doing(n)
+            confirmado = cola.a_doing(n, agente_de_etiquetas(cfg, etq))
         except Exception as e:  # noqa: BLE001
             log(f"#{n}: error moviendo a Doing: {e}")
             confirmado = False
