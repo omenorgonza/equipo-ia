@@ -142,6 +142,30 @@ def normalizar_fallos(valor) -> int:
     return max(FALLOS_PARA_ESCALAR[0], min(FALLOS_PARA_ESCALAR[-1], n))
 
 
+VERDADEROS = ("true", "1", "si", "sí", "yes", "on", "verdadero")
+FALSOS = ("false", "0", "no", "off", "falso", "")
+_avisos_bool: set[str] = set()
+
+
+def normalizar_bool(valor, defecto: bool = True, clave: str = "") -> bool:
+    """Interruptor del config.json: true/false de JSON y también "false", "no", 0… escritos a mano.
+    Un valor que no se entiende deja `defecto`, con un aviso en el log (una vez por valor, no en cada ciclo)."""
+    if valor is None:
+        return defecto
+    if isinstance(valor, bool):
+        return valor
+    if isinstance(valor, (int, float)) and valor in (0, 1):
+        return bool(valor)
+    if isinstance(valor, str) and valor.strip().lower() in VERDADEROS + FALSOS:
+        return valor.strip().lower() in VERDADEROS
+    marca = f"{clave}={valor!r}"
+    if marca not in _avisos_bool:
+        _avisos_bool.add(marca)
+        log(f"⚠ {clave or 'interruptor'}: valor no válido {json.dumps(valor, ensure_ascii=False)} en el config.json; "
+            f"uso {'true' if defecto else 'false'} (escribe true o false)")
+    return defecto
+
+
 def normalizar_cadena(valor) -> list[str]:
     """cadena_escalado: agentes en orden (junior → … → senior). Sin valor o con uno no válido, lista vacía: el junior
     escala directamente a revision.senior, como siempre."""
@@ -187,21 +211,26 @@ def cargar_config() -> dict:
     cfg.setdefault("clon_local", "repo")
     cfg.setdefault("rama_por_defecto", None)
     cfg.setdefault("fuente_cola", "etiquetas")
-    cfg["escalar_fallos"] = bool(cfg.get("escalar_fallos", True))  # junior que falla: reintento y después el senior
+    # junior que falla: reintento y después el senior ("false" escrito a mano también lo apaga)
+    cfg["escalar_fallos"] = normalizar_bool(cfg.get("escalar_fallos"), True, "escalar_fallos")
     cfg["fallos_para_escalar"] = normalizar_fallos(cfg.get("fallos_para_escalar"))
     cfg["cadena_escalado"] = normalizar_cadena(cfg.get("cadena_escalado"))
     rev = fusionar(REVISION_DEFECTO, cfg.get("revision") or {})
     rev["rondas_minimas"] = max(2, int(rev["rondas_minimas"]))  # nunca menos de dos rondas
     rev["rondas_maximas"] = max(rev["rondas_minimas"], int(rev["rondas_maximas"]))
+    rev["antes_de_pr"] = normalizar_bool(rev.get("antes_de_pr"), False, "revision.antes_de_pr")
     cfg["revision"] = rev
     autores = cfg.get("autores_autorizados") or [cfg.get("autor_autorizado", "")]
     cfg["autores_autorizados"] = [a.lower() for a in autores if a]
     for k in ("git_bin", "gh_bin"):
         if isinstance(cfg[k], str):
             cfg[k] = [cfg[k]]
-    for ag in cfg["agentes"].values():
+    for nombre, ag in cfg["agentes"].items():
         if isinstance(ag.get("bin"), str):
             ag["bin"] = [ag["bin"]]
+        for k in ("activo", "standalone"):  # "false" escrito a mano apaga, como false
+            if k in ag:
+                ag[k] = normalizar_bool(ag[k], True, f"agentes.{nombre}.{k}")
     return cfg
 
 
@@ -1118,8 +1147,9 @@ def validar_issue(cfg: dict, issue: dict, escalado_a: str | None = None) -> tupl
     etiquetas = {l["name"] for l in issue.get("labels", [])}
     agente = agente_de_etiquetas(cfg, etiquetas)
     if not agente:
+        activas = [a["etiqueta"] for a in cfg["agentes"].values() if a.get("activo", True)]  # los apagados, no
         raise Bloqueo("La issue no tiene exactamente una etiqueta de agente válida",
-                      f"Deja una sola etiqueta de agente ({', '.join(a['etiqueta'] for a in cfg['agentes'].values())}) "
+                      f"Deja una sola etiqueta de agente ({', '.join(activas) or 'no hay ningún agente activo'}) "
                       "y vuelve a poner ready.")
     datos = parsear_issue(issue.get("body", ""))
     if datos["agente"] and datos["agente"] != agente and agente != escalado_a:
@@ -2002,6 +2032,9 @@ class Procesador:
             tiempos["diffstat"] = diff
             tiempos.pop("conflicto", None)
             tiempos.pop("fallos_agente", None)  # el intento bueno ya está en el commit
+            # …y el contador de intentos vuelve a cero: si después la CI sale en rojo y Óscar ejecuta
+            # `reanudar --desde agente`, el agente empieza con todos sus intentos (el escalado vigente se conserva)
+            tiempos.pop("fallos_cuenta", None)
             if (tiempos.get("revision") or {}).get("completa_sha"):
                 tiempos["revision"]["repetir"] = True  # código nuevo: la aprobación anterior ya no vale
             actualizar(con, self.repo, numero, tiempos=json.dumps(tiempos))
@@ -2418,13 +2451,12 @@ class Procesador:
                 try:
                     clasificar_fallo_agente(r)
                 except Bloqueo as b:
-                    reserva = self._reserva_revisor(revisor, usados)
+                    reserva, nota = self._reserva_revisor(revisor, usados, autor)
                     if b.causa.startswith("Cuota agotada") and reserva:
                         # revisor sin cuota: revisa la reserva (revision.reservas), sin gastar el intento de la ronda
-                        log(f"#{numero}: el revisor '{revisor}' no tiene cuota; revisa '{reserva}' (reserva)")
+                        log(f"#{numero}: el revisor '{revisor}' no tiene cuota; {nota.replace('`', chr(39))}")
                         rev.setdefault("avisos", []).append({
-                            "n": n, "publicada": False,
-                            "texto": f"el revisor `{revisor}` no tiene cuota: revisa `{reserva}` (reserva)"})
+                            "n": n, "publicada": False, "texto": f"el revisor `{revisor}` no tiene cuota: {nota}"})
                         self._guardar_revision(con, numero, rev, meta)
                         if publicada:
                             self._publicar_rondas(con, numero, rev, meta)
@@ -2452,11 +2484,25 @@ class Procesador:
         raise Bloqueo(f"Revisión entre agentes: la ronda {n} no es válida ({motivo})",
                       f"Revisa el log del revisor ({revisor}) y ejecuta `reanudar {numero}`: la ronda se repite.", f"Log: {logp}")
 
-    def _reserva_revisor(self, revisor: str, usados: set[str]) -> str | None:
-        """Reserva configurada para un revisor sin cuota (revision.reservas), si está activa y aún no se ha probado."""
+    def _reserva_revisor(self, revisor: str, usados: set[str], autor: str) -> tuple[str | None, str]:
+        """Reserva configurada para un revisor sin cuota (revision.reservas), si está activa y aún no se ha probado,
+        y la nota para la PR. Si la reserva es el propio autor, revisa otro agente activo (el senior primero); si no
+        hay ninguno, el autor se revisa a sí mismo en una sesión nueva y la nota lo dice claramente."""
+        def libre(x) -> bool:
+            ag = self.cfg["agentes"].get(x or "")
+            return bool(x and x not in usados and ag and ag.get("activo", True))
         r = (self.cfg["revision"].get("reservas") or {}).get(revisor)
-        ag = self.cfg["agentes"].get(r or "")
-        return r if r and r not in usados and ag and ag.get("activo", True) else None
+        if not libre(r):
+            return None, ""
+        if r != autor:
+            return r, f"revisa `{r}` (reserva)"
+        otro = next((x for x in [self.cfg["revision"].get("senior"), *self.cfg["agentes"]] if x != autor and libre(x)),
+                    None)
+        if otro:
+            return otro, f"su reserva `{r}` es el autor del cambio, así que revisa `{otro}` (otro agente activo)"
+        return r, (f"su reserva `{r}` es el autor del cambio y no hay otro agente activo que pueda revisar: ⚠ **`{r}` "
+                   "revisa su propio cambio** (en una sesión nueva, sin su conversación). Conviene que Óscar lo mire "
+                   "con más cuidado")
 
     def _publicar_rondas(self, con, numero: int, rev: dict, meta: dict) -> None:
         """Comenta en la PR lo que aún no esté publicado (primero se guarda la ronda y después se publica)."""
@@ -2839,12 +2885,35 @@ def cmd_diagnostico(_a) -> None:
         diagnostico_motores(cfg, ok)
 
 
+MODELO_OPENCODE = re.compile(r"^([A-Za-z0-9_.-]+/[^\s/][^\s]*)(\s|$)")
+
+
+def catalogo_opencode_json() -> set[str]:
+    """Catálogo propio de opencode.json del laboratorio (provider.<p>.models), como «proveedor/modelo»."""
+    try:
+        oc = json.loads((LAB / "opencode.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {f"{p}/{m}" for p, d in (oc.get("provider") or {}).items() if isinstance(d, dict)
+            for m in (d.get("models") or {}) if isinstance(d.get("models"), dict)}
+
+
 def catalogo_opencode(ag: dict) -> tuple[set[str] | None, str]:
-    """Modelos que OpenCode conoce (`opencode models`, uno «proveedor/modelo» por línea). None si no se pudo consultar."""
+    """Modelos que OpenCode conoce (`opencode models`, uno «proveedor/modelo» por línea) y de dónde salen.
+    Si el servicio de OpenCode no arranca, se aprovecha lo que llegara a listar y, si no listó nada, el catálogo de
+    opencode.json. None solo si no hay ninguna de las dos cosas (con el error, sin secretos)."""
     r = ejecutar(ag["bin"] + ["models"], cwd=LAB, timeout=60, env=entorno_limpio())
-    if r.returncode != 0:
-        return None, redactar(((r.stderr or "") + (r.stdout or "")).strip())[:200] or f"código {r.returncode}"
-    return {l.strip().split()[0] for l in (r.stdout or "").splitlines() if l.strip()}, ""
+    modelos = {m.group(1) for l in (r.stdout or "").splitlines() if (m := MODELO_OPENCODE.match(l.strip()))}
+    if r.returncode == 0:
+        return modelos, "opencode models"
+    error = redactar(((r.stderr or "") + (r.stdout or "")).strip()).splitlines()
+    error = _corto(" ".join(x for x in error if not MODELO_OPENCODE.match(x.strip())), 200) or f"código {r.returncode}"
+    if modelos:
+        return modelos, f"opencode models, aunque terminó con error: {error}"
+    propio = catalogo_opencode_json()
+    if propio:
+        return propio, f"opencode.json (`opencode models` no arrancó: {error})"
+    return None, error
 
 
 def diagnostico_motores(cfg: dict, ollama_ok: bool) -> None:
@@ -2880,9 +2949,13 @@ def diagnostico_motores(cfg: dict, ollama_ok: bool) -> None:
             clave = json.dumps(ag["bin"])
             if clave not in catalogos:
                 catalogos[clave] = catalogo_opencode(ag)
+                catalogo, fuente = catalogos[clave]
+                if catalogo is not None:  # una vez por ejecutable de OpenCode
+                    print(f"    catálogo de OpenCode ({fuente}): {', '.join(sorted(catalogo)) or '(vacío)'}")
             catalogo, error = catalogos[clave]
             if catalogo is None:
-                print(f"    ? no pude consultar el catálogo de OpenCode (`opencode models`): {error}")
+                print(f"    ? no pude consultar el catálogo de OpenCode (`opencode models`) y opencode.json no tiene "
+                      f"provider.ollama.models: {error}")
             elif ident not in catalogo:
                 print(f"    ⚠ {ident} no está en el catálogo de OpenCode (`opencode models`): añádelo a "
                       "provider.ollama.models de opencode.json o el agente fallará al arrancar")
@@ -2982,6 +3055,12 @@ def cmd_probar(a) -> None:
     proveedor = cfg["agentes"][nombre]["proveedor"]
     carpeta = ESTADO / "pruebas" / f"{nombre}-{dt.datetime.now():%Y%m%d-%H%M%S}"
     carpeta.mkdir(parents=True)
+    # OpenCode trabaja en la raíz git del directorio actual, no en el propio directorio: sin un repo propio, la
+    # carpeta de la prueba (dentro del laboratorio) haría que el archivo cayera en la raíz del laboratorio.
+    rg = ejecutar(cfg["git_bin"] + ["init", "-q", str(carpeta)], cwd=carpeta, timeout=60)
+    if rg.returncode != 0:
+        print(f"⚠ no pude crear un repo git en la carpeta de la prueba ({(rg.stderr or '').strip()[:160]}); "
+              "OpenCode podría escribir en la raíz git del laboratorio")
     archivo = f"prueba-{nombre}.txt"
     prompt = f"Crea el archivo {archivo} en el directorio actual con exactamente el texto LISTO (sin nada más). No hagas nada más."
     antes = ollama_ps(cfg) if proveedor == "ollama" else []
@@ -3003,6 +3082,10 @@ def cmd_probar(a) -> None:
     (carpeta / "salida-agente.log").write_text(f"{r.args}\n{r.returncode}\n{r.stdout}\n{r.stderr}", encoding="utf-8")
     print(f"Carpeta: {carpeta}\nCódigo de salida: {r.returncode}  Duración: {dur}s")
     print(f"Archivo {archivo}: {'contenido=' + repr(contenido) if contenido is not None else 'NO CREADO'}")
+    if contenido is None:  # ¿lo escribió en otra raíz git (la del laboratorio)? Se avisa; no se borra nada ajeno
+        fuera = [p for p in {LAB / archivo, PD / archivo} if p.exists()]
+        if fuera:
+            print(f"⚠ el agente lo escribió fuera de la carpeta de la prueba: {', '.join(map(str, fuera))}")
     if proveedor == "ollama":
         print(f"Ollama api/ps antes: {antes or 'ninguno'}  después: {evid.get('ollama_ps') or 'ninguno'}")
     if proveedor == "codex":

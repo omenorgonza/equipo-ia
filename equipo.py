@@ -5,6 +5,7 @@
   python3 equipo.py panel [--puerto 8765]           Panel web local (http://127.0.0.1:8765)
   python3 equipo.py <proyecto> vigilar|una-vez|estado|parar|reanudar N|diagnostico|leccion …
   python3 equipo.py <proyecto> tablero ver|nueva|verificar …
+  python3 equipo.py <proyecto> preparar             Repite la preparación de GitHub (etiquetas de todos sus agentes…)
   python3 equipo.py importar <nombre> --repo owner/repo [--repo owner/otro] [--descripcion "…"]
   python3 equipo.py nuevo <nombre> --repo nombre-repo [--repo otro] --stack python|vacio [--descripcion "…"]
   python3 equipo.py migrar                          Convierte la instalación de un proyecto (v3) en proyectos/ensayo
@@ -19,6 +20,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -88,12 +91,42 @@ def cfg_proyecto(nombre: str) -> dict:
     return C.fusionar(equipo_cfg(), cfg)
 
 
-def guardar_cfg_proyecto(nombre: str, cambios: dict) -> None:
-    p = PROYECTOS / nombre / "config.json"
-    cfg = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-    cfg.update(cambios)
+_cfg_lock = threading.Lock()  # el panel atiende peticiones en paralelo (ThreadingHTTPServer)
+
+
+def escribir_json_atomico(p: Path, datos: dict) -> None:
+    """Escribe en un temporal propio de la misma carpeta y lo cambia por el archivo de una vez: `vigilar` nunca lee
+    un config.json a medias y, pase lo que pase, no queda ningún .tmp (si Windows tiene el archivo abierto un
+    instante, se reintenta)."""
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    fd, tmp = tempfile.mkstemp(prefix=f".{p.name}.", suffix=".tmp", dir=str(p.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(datos, indent=2, ensure_ascii=False) + "\n")
+        if p.exists():  # mkstemp crea el temporal con permisos 600: se conservan los del archivo
+            os.chmod(tmp, p.stat().st_mode & 0o777)
+        for i in range(10):
+            try:
+                os.replace(tmp, p)
+                break
+            except PermissionError:
+                if i == 9:
+                    raise
+                time.sleep(0.05 * (i + 1))
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def guardar_cfg_proyecto(nombre: str, cambios: dict) -> dict:
+    """Cambia solo las claves de `cambios` en proyectos/<nombre>/config.json. Leer, mezclar y escribir va bajo un
+    cerrojo: dos guardados seguidos desde el panel (color y escalado) no se pisan. Devuelve el config guardado."""
+    p = PROYECTOS / nombre / "config.json"
+    with _cfg_lock:
+        cfg = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        cfg.update(cambios)
+        escribir_json_atomico(p, cfg)
+    return cfg
 
 
 def color_guardado(nombre: str) -> str | None:
@@ -354,18 +387,27 @@ def copiar_instalacion(clon: Path, repo: str, tablero: dict, checks: list[str], 
     return avisos
 
 
-def preparar_github(repo: str, tablero: dict, simulado: bool) -> list[str]:
-    """Etiquetas, variables, Dependabot y comprobación del secreto. Devuelve pendientes para Óscar."""
-    pendientes = []
+def colores_etiquetas(agentes: dict) -> dict[str, str]:
+    """Etiquetas que el equipo usa en cada repo, con su color. Una por agente configurado (agent:codex,
+    agent:local-plus…, también los definidos solo en el config.json del proyecto), con color fijo si no es de los
+    de siempre."""
     colores = {"agent:claude": "D97757", "agent:local": "2B7A78", "mantenimiento": "5319E7", "simulado": "C5DEF5",
                "registro-mantenimiento": "BFDADC", "dependencias": "0366D6",
                "estado:backlog": "EDEDED", "estado:planning": "FBCA04", "estado:todo": "0E8A16",
                "prioridad:p0": "B60205", "prioridad:p1": "D93F0B", "prioridad:p2": "FBCA04", "prioridad:p3": "C2E0C6"}
-    # una etiqueta por agente configurado (agent:codex, agent:local-plus…), con color fijo si no es de los de siempre
     otros = ("10A37F", "6F42C1", "1D76DB", "B4A7D6", "F9D0C4")
-    for i, ag in enumerate(a for a in (equipo_cfg().get("agentes") or {}).values()
-                           if isinstance(a, dict) and a.get("etiqueta") and a["etiqueta"] not in colores):
-        colores[ag["etiqueta"]] = otros[i % len(otros)]
+    nuevas = [a["etiqueta"] for a in (agentes or {}).values()
+              if isinstance(a, dict) and isinstance(a.get("etiqueta"), str) and a["etiqueta"] not in colores]
+    for i, etq in enumerate(dict.fromkeys(nuevas)):
+        colores[etq] = otros[i % len(otros)]
+    return colores
+
+
+def preparar_github(repo: str, tablero: dict, simulado: bool, agentes: dict | None = None) -> list[str]:
+    """Etiquetas, variables, Dependabot y comprobación del secreto. Devuelve pendientes para Óscar.
+    `agentes`: los del proyecto (equipo.json con su config.json encima); sin ellos, los de equipo.json."""
+    pendientes = []
+    colores = colores_etiquetas(equipo_cfg().get("agentes") if agentes is None else agentes)
     for etq, color in colores.items():
         gh("label", "create", etq, "--repo", repo, "--color", color, "--force", comprobar=False)
     if simulado:
@@ -508,13 +550,29 @@ def crear_proyecto(nombre: str, repos: list[str], crear_repos: bool, stack: str,
             guardar_cfg_proyecto(nombre, {"ci": {"checks": ci["checks"], "timeout_s": 2400, "intervalo_s": 20}})
             git("fetch", "origin", cwd=clon, comprobar=False)
             git("remote", "set-head", "origin", "--auto", cwd=clon, comprobar=False)
-        pendientes += preparar_github(repo, tablero, simulado)
+        pendientes += preparar_github(repo, tablero, simulado, cfg_proyecto(nombre).get("agentes"))
 
     if not plantilla:
         pendientes.append(f"Crear las vistas «Tablero» y «Planning» en {tablero.get('url')}")
     guardar_cfg_proyecto(nombre, {"instalacion": {"prs": prs, "pendientes": pendientes, "fecha": C.ahora()}})
     log("Hecho. Pendiente para Óscar:\n  - " + "\n  - ".join(pendientes))
     return {"nombre": nombre, "tablero": tablero.get("url"), "prs": prs, "pendientes": pendientes}
+
+
+def preparar_proyecto(nombre: str, log=print) -> list[str]:
+    """`equipo.py <proyecto> preparar`: repite la preparación de GitHub de cada repo del proyecto (etiquetas,
+    variables, secreto). Sirve, p. ej., tras añadir un agente en el config.json del proyecto: crea su etiqueta."""
+    cfg = cfg_proyecto(nombre)
+    tablero = cfg.get("tablero") or {}
+    if not tablero.get("numero"):
+        raise RuntimeError(f"El proyecto {nombre} no tiene tablero en su config.json")
+    repos = [r for r in (cfg.get("repos") or [cfg.get("repo")]) if r]
+    pendientes: list[str] = []
+    for repo in repos:
+        pendientes += preparar_github(repo, tablero, bool(cfg.get("simular_actions")), cfg.get("agentes"))
+        log(f"{repo}: etiquetas al día ({', '.join(e for e in colores_etiquetas(cfg.get('agentes')) if e.startswith('agent:'))})")
+    log("Pendiente para Óscar:\n  - " + "\n  - ".join(pendientes) if pendientes else "Nada pendiente.")
+    return pendientes
 
 
 # --------------------------------------------------------------------------- migración v3 → v4
@@ -604,6 +662,12 @@ def main() -> None:
         sys.exit(f"No existe el proyecto «{nombre}». Proyectos: {', '.join(proyectos()) or '(ninguno)'}")
     if not resto:
         sys.exit("Falta el comando: vigilar, una-vez, estado, parar, reanudar N, tablero ver…")
+    if resto[0] == "preparar":
+        try:
+            preparar_proyecto(nombre)
+        except RuntimeError as e:
+            sys.exit(str(e))
+        return
     if resto[0] in COMANDOS_TABLERO:
         sys.exit(script(nombre, "tablero.py", *resto[1:]).returncode)
     if resto[0] in COMANDOS_ENSAYO:

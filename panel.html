@@ -256,10 +256,16 @@ async function post(url, cuerpo) {
   return r.json();
 }
 
+// Cada guardado (color, escalado) sube `guardados`: una carga que empezó antes y llega después traería los valores
+// viejos y pintaría como perdido lo que se acaba de guardar, así que se descarta y se pide otra.
+let guardados = 0;
 async function cargar(forzar) {
   document.getElementById("gen").textContent = "actualizando…";
+  const antes = guardados;
   const r = await fetch("/api/estado" + (forzar ? "?refrescar=1" : ""));
-  datos = await r.json();
+  const nuevos = await r.json();
+  if (antes !== guardados) return cargar(forzar);
+  datos = nuevos;
   pintar();
 }
 
@@ -375,6 +381,7 @@ async function guardarEscalado(p) {
   const r = await post(`/api/proyecto/${p}/escalado`, {activo: document.getElementById(`esc-a-${p}`).checked,
                                                       fallos: Number(document.getElementById(`esc-n-${p}`).value)});
   if (!r.ok) return toast(r.error || "No se pudo guardar el escalado");
+  guardados++;
   delete escPendiente[p];
   const pr = datos.proyectos.find(x => x.nombre === p);
   if (pr) pr.escalado = {...pr.escalado, activo: r.activo, fallos: r.fallos};
@@ -393,6 +400,7 @@ function botonSiguiente(p, a) {
 async function accion(p, a) { const r = await post(`/api/proyecto/${p}/${a}`); toast(r.mensaje || r.error); setTimeout(() => cargar(), 1200); }
 async function cambiarColor(p, c) { const r = await post(`/api/proyecto/${p}/color`, {color: c});
   if (!r.ok) return toast(r.error || "No se pudo guardar el color");
+  guardados++;
   const pr = datos.proyectos.find(x => x.nombre === p); if (pr) pr.color = r.color; pintar(); }
 async function reintentar(p, n) { const r = await post(`/api/proyecto/${p}/reintentar`, {numero: n}); toast(r.ok ? `#${n} vuelve a To Do para el agente` : r.mensaje); setTimeout(() => cargar(true), 1500); }
 async function reanudar(p, n) { const r = await post(`/api/proyecto/${p}/reanudar`, {numero: n}); toast(r.ok ? `#${n} se reanuda desde el paso pendiente` : (r.mensaje || r.error)); setTimeout(() => cargar(true), 1500); }

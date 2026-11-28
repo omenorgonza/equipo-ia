@@ -366,7 +366,11 @@ elif a[:2] == ["secret", "set"]:
         nombres.append(a[2])
     # Solo la huella: el ensayo comprueba que llegó el valor correcto sin que el valor toque el disco.
     s.setdefault("secretos_sha", {})[f"{repo}:{a[2]}"] = hashlib.sha256(valor.encode()).hexdigest()
-elif a[:2] in (["label", "create"], ["variable", "set"], ["project", "field-create"]):
+elif a[:2] == ["label", "create"]:  # el ensayo comprueba qué etiquetas existen en cada repo
+    etiquetas = s.setdefault("labels", {}).setdefault(repo_de(a), [])
+    if a[2] not in etiquetas:
+        etiquetas.append(a[2])
+elif a[:2] in (["variable", "set"], ["project", "field-create"]):
     pass
 elif a[:2] == ["project", "link"]:
     s["projects"][a[2]].setdefault("links", []).append(opt(a, "--repo"))

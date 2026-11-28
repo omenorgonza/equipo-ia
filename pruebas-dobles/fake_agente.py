@@ -10,8 +10,22 @@ if leak:
     print("FUGA DE CREDENCIALES:", leak, file=sys.stderr)
     sys.exit(3)
 if a[:1] == ["models"]:  # `opencode models`: catálogo de OpenCode (FAKE_OPENCODE_MODELOS, separados por comas)
+    servicio = os.environ.get("FAKE_OPENCODE_SERVICIO", "ok")  # caido: el servicio no arranca (lista: sí, a medias)
+    if servicio == "caido":
+        print("Error: failed to start server on port 4096 (ECONNREFUSED)", file=sys.stderr)
+        sys.exit(1)
     print("\n".join(os.environ.get("FAKE_OPENCODE_MODELOS", "ollama/qwen2.5-coder:14b").split(",")))
+    if servicio == "lista":
+        print("Error: failed to start server on port 4096", file=sys.stderr)
+        sys.exit(1)
     sys.exit(0)
+
+
+def raiz_git() -> Path:
+    """Como OpenCode de verdad: trabaja en la raíz git del directorio actual (FAKE_OPENCODE_RAIZ_GIT=1)."""
+    import subprocess as _sp
+    r = _sp.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    return Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else Path.cwd()
 if "--file" in a:
     prompt = Path(a[a.index("--file") + 1]).read_text(encoding="utf-8")
     if os.environ.get("FAKE_AGENTE_TURNOS"):  # cada invocación de opencode: modelo, --standalone, inicio y fin
@@ -109,7 +123,8 @@ if "PASO-A-PASO" in prompt:
     sys.exit(0)
 if "prueba-" in prompt and "LISTO" in prompt:
     nombre = prompt.split("archivo ")[1].split()[0]
-    Path(nombre).write_text("LISTO\n")
+    raiz = raiz_git() if "--file" in a and os.environ.get("FAKE_OPENCODE_RAIZ_GIT") == "1" else Path(".")
+    (raiz / nombre).write_text("LISTO\n")
 elif "Implementa la función" in prompt:
     Path("src").mkdir(exist_ok=True)
     Path("src/puntos.py").write_text(
@@ -135,11 +150,12 @@ elif "Crea el archivo docs/" in prompt:
     Path(ruta).parent.mkdir(parents=True, exist_ok=True)
     # Guion de fallos del autor (marca [FALLO:…] del objetivo): fuera1 (escribe fuera de alcance la primera vez),
     # junior (el agente local falla siempre), todos (falla cualquiera), cuota (el local agota la cuota),
-    # junior1 (el local falla solo la primera vez), cuota2 (el local falla, agota la cuota y después falla siempre).
+    # junior1 (el local falla solo la primera vez), cuota2 (el local falla, agota la cuota y después falla siempre),
+    # alterno (el local falla en sus invocaciones impares: 1.ª, 3.ª…).
     fallo = (_re.search(r"\[FALLO:(\w+)\]", prompt) or [None, ""])[1]
     local = "--file" in a
     vez_local = 0
-    if local and fallo in ("junior1", "cuota2"):  # invocaciones del local en esta issue, contando esta
+    if local and fallo in ("junior1", "cuota2", "alterno"):  # invocaciones del local en esta issue, contando esta
         n_issue = _re.search(r"issue #(\d+)", prompt).group(1)
         cuenta = Path(os.environ["FAKE_GH_STATE"] + f".fallo-{fallo}-{n_issue}")
         vez_local = int(cuenta.read_text() or 0) + 1 if cuenta.exists() else 1
@@ -157,7 +173,7 @@ elif "Crea el archivo docs/" in prompt:
         print("Claude AI usage limit reached|1700000000", file=sys.stderr)
         sys.exit(1)
     elif fallo == "todos" or (fallo == "junior" and local) or (fallo == "junior1" and vez_local == 1) \
-            or (fallo == "cuota2" and local):
+            or (fallo == "cuota2" and local) or (fallo == "alterno" and vez_local % 2 == 1):
         Path(ruta).write_text("# A medias\n")
         print("Error: no he sabido terminar la tarea", file=sys.stderr)
         sys.exit(1)

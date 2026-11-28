@@ -584,13 +584,16 @@ def guardar_secreto(nombre: str, token) -> dict:
 def cambiar_color(nombre: str, color) -> tuple[dict, int]:
     if color not in E.PALETA:
         return {"ok": False, "error": f"Color no válido; usa uno de: {', '.join(E.PALETA)}"}, 400
-    E.guardar_cfg_proyecto(nombre, {"color": color})
+    try:
+        E.guardar_cfg_proyecto(nombre, {"color": color})
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": f"No pude guardar config.json: {str(e)[:200]}"}, 500
     return {"ok": True, "color": color, "mensaje": f"Color de {nombre}: {color}"}, 200
 
 
 def escalado_proyecto(cfg: dict) -> dict:
     """Ajustes del escalado automático al senior tal como los aplicará el coordinador (config.json sobre equipo.json)."""
-    return {"activo": bool(cfg.get("escalar_fallos", True)),
+    return {"activo": C.normalizar_bool(cfg.get("escalar_fallos"), True, "escalar_fallos"),  # "false" también apaga
             "fallos": C.normalizar_fallos(cfg.get("fallos_para_escalar")),
             "opciones": list(C.FALLOS_PARA_ESCALAR),
             "senior": (cfg.get("revision") or {}).get("senior") or C.REVISION_DEFECTO["senior"],
@@ -605,15 +608,10 @@ def guardar_escalado(nombre: str, d: dict) -> tuple[dict, int]:
         return {"ok": False, "error": "«activo» debe ser true o false"}, 400
     if isinstance(fallos, bool) or not isinstance(fallos, int) or fallos not in C.FALLOS_PARA_ESCALAR:
         return {"ok": False, "error": f"«fallos» debe ser uno de {list(C.FALLOS_PARA_ESCALAR)}"}, 400
-    ruta = E.PROYECTOS / nombre / "config.json"
-    try:
-        cfg = json.loads(ruta.read_text(encoding="utf-8"))
+    try:  # mismo cerrojo y escritura atómica que el color: guardados seguidos no se pisan ni dejan .tmp
+        E.guardar_cfg_proyecto(nombre, {"escalar_fallos": activo, "fallos_para_escalar": fallos})
     except (OSError, ValueError) as e:
-        return {"ok": False, "error": f"No pude leer {ruta.name}: {str(e)[:200]}"}, 500
-    cfg["escalar_fallos"], cfg["fallos_para_escalar"] = activo, fallos
-    tmp = ruta.with_name(ruta.name + ".tmp")
-    tmp.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.replace(ruta)
+        return {"ok": False, "error": f"No pude guardar config.json: {str(e)[:200]}"}, 500
     with _cache_lock:
         _cache.clear()
     texto = (f"escala al senior tras {fallos} fallo(s) del junior" if activo
