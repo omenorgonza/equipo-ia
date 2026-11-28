@@ -145,12 +145,15 @@ def normalizar_fallos(valor) -> int:
 VERDADEROS = ("true", "1", "si", "sí", "yes", "on", "verdadero")
 FALSOS = ("false", "0", "no", "off", "falso", "")
 _avisos_bool: set[str] = set()
+AUSENTE = object()  # clave que no está en el config.json (distinto de un `null` escrito a mano)
 
 
-def normalizar_bool(valor, defecto: bool = True, clave: str = "") -> bool:
+def normalizar_bool(valor=AUSENTE, defecto: bool = True, clave: str = "") -> bool:
     """Interruptor del config.json: true/false de JSON y también "false", "no", 0… escritos a mano.
-    Un valor que no se entiende deja `defecto`, con un aviso en el log (una vez por valor, no en cada ciclo)."""
-    if valor is None:
+    Sin la clave (AUSENTE) vale `defecto` en silencio. Un valor que no se entiende —también un `null` explícito—
+    deja `defecto`, con un aviso en el log (una vez por valor, no en cada ciclo).
+    Lee la clave con `cfg.get(clave, AUSENTE)`, no con `cfg.get(clave)`, para no confundir null con ausente."""
+    if valor is AUSENTE:
         return defecto
     if isinstance(valor, bool):
         return valor
@@ -212,13 +215,13 @@ def cargar_config() -> dict:
     cfg.setdefault("rama_por_defecto", None)
     cfg.setdefault("fuente_cola", "etiquetas")
     # junior que falla: reintento y después el senior ("false" escrito a mano también lo apaga)
-    cfg["escalar_fallos"] = normalizar_bool(cfg.get("escalar_fallos"), True, "escalar_fallos")
+    cfg["escalar_fallos"] = normalizar_bool(cfg.get("escalar_fallos", AUSENTE), True, "escalar_fallos")
     cfg["fallos_para_escalar"] = normalizar_fallos(cfg.get("fallos_para_escalar"))
     cfg["cadena_escalado"] = normalizar_cadena(cfg.get("cadena_escalado"))
     rev = fusionar(REVISION_DEFECTO, cfg.get("revision") or {})
     rev["rondas_minimas"] = max(2, int(rev["rondas_minimas"]))  # nunca menos de dos rondas
     rev["rondas_maximas"] = max(rev["rondas_minimas"], int(rev["rondas_maximas"]))
-    rev["antes_de_pr"] = normalizar_bool(rev.get("antes_de_pr"), False, "revision.antes_de_pr")
+    rev["antes_de_pr"] = normalizar_bool(rev.get("antes_de_pr", AUSENTE), False, "revision.antes_de_pr")
     cfg["revision"] = rev
     autores = cfg.get("autores_autorizados") or [cfg.get("autor_autorizado", "")]
     cfg["autores_autorizados"] = [a.lower() for a in autores if a]

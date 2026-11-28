@@ -91,7 +91,8 @@ las aplica en el ciclo siguiente, sin reiniciar.
 ```
 
 `escalar_fallos` también entiende `"false"`, `"no"` o `0` escritos a mano (y `"true"`, `"sí"`, `1`). Con un valor
-que no entiende, lo deja **activado** y lo avisa una vez en el log. Lo mismo vale para `activo` y `standalone` de
+que no entiende —también un `null` explícito—, lo deja **activado** y lo avisa una vez en el log; si la clave no
+está, queda activado sin aviso. Lo mismo vale para `activo` y `standalone` de
 cada agente y para `revision.antes_de_pr` (este, si no se entiende, queda apagado).
 
 Los intentos gastados se guardan en el registro: tras un Bloqueo y `reanudar`, el junior solo tiene los que le

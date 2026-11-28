@@ -593,7 +593,7 @@ def cambiar_color(nombre: str, color) -> tuple[dict, int]:
 
 def escalado_proyecto(cfg: dict) -> dict:
     """Ajustes del escalado automático al senior tal como los aplicará el coordinador (config.json sobre equipo.json)."""
-    return {"activo": C.normalizar_bool(cfg.get("escalar_fallos"), True, "escalar_fallos"),  # "false" también apaga
+    return {"activo": C.normalizar_bool(cfg.get("escalar_fallos", C.AUSENTE), True, "escalar_fallos"),  # "false" también apaga
             "fallos": C.normalizar_fallos(cfg.get("fallos_para_escalar")),
             "opciones": list(C.FALLOS_PARA_ESCALAR),
             "senior": (cfg.get("revision") or {}).get("senior") or C.REVISION_DEFECTO["senior"],

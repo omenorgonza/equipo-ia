@@ -1133,14 +1133,24 @@ python3 - <<'PY' && ok "escalar_fallos escrito como texto: \"false\" lo apaga; u
 import contextlib, io, json
 import coordinador as C
 import panel as P
-for valor, esperado in (("false", False), ("False", False), ("no", False), (0, False), ("true", True), (None, True)):
+for valor, esperado in (("false", False), ("False", False), ("no", False), (0, False), ("true", True)):
     assert C.normalizar_bool(valor, True, "escalar_fallos") is esperado, (valor, esperado)
     assert P.escalado_proyecto({"escalar_fallos": valor})["activo"] is esperado, valor
+salida = io.StringIO()
+with contextlib.redirect_stdout(salida):
+    assert C.normalizar_bool(C.AUSENTE, True, "escalar_fallos") is True  # sin la clave: activado y sin aviso
+    assert P.escalado_proyecto({})["activo"] is True
+assert "valor no válido" not in salida.getvalue(), salida.getvalue()
 salida = io.StringIO()
 with contextlib.redirect_stdout(salida):
     assert C.normalizar_bool("quizás", True, "escalar_fallos") is True
     assert C.normalizar_bool("quizás", True, "escalar_fallos") is True  # el aviso sale una vez, no en cada ciclo
 assert salida.getvalue().count("escalar_fallos: valor no válido") == 1, salida.getvalue()
+salida = io.StringIO()
+with contextlib.redirect_stdout(salida):  # `null` explícito no es lo mismo que no poner la clave: avisa
+    assert C.normalizar_bool(None, True, "escalar_fallos") is True
+    assert P.escalado_proyecto({"escalar_fallos": None})["activo"] is True
+assert salida.getvalue().count("escalar_fallos: valor no válido null") == 1, salida.getvalue()
 PY
 EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "escalar_fallos como texto en el config.json: cargar_config y la recarga de vigilar lo aplican (\"false\" apaga; valor raro → activado con aviso)" || mal "escalar_fallos como texto en el config.json"
 import contextlib, io, json
@@ -1165,6 +1175,12 @@ with contextlib.redirect_stdout(salida):
     C.recargar_escalado(cfg)
 assert cfg["escalar_fallos"] is True, cfg["escalar_fallos"]
 assert salida.getvalue().count("escalar_fallos: valor no válido \"tal vez\"") == 1, salida.getvalue()
+escribir(None)  # `null` explícito en el config.json: activado, pero con aviso (no se trata como clave ausente)
+C._avisos_bool.clear()
+salida = io.StringIO()
+with contextlib.redirect_stdout(salida):
+    assert C.cargar_config()["escalar_fallos"] is True
+assert "escalar_fallos: valor no válido null" in salida.getvalue(), salida.getvalue()
 PY
 cp "$S.demo-config-panel.bak" proyectos/demo/config.json
 grep -q "htmlEscalado(p)" panel.html && grep -q "/escalado" panel.html && grep -q 'id="esc-a-' panel.html \
