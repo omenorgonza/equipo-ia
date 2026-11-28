@@ -1658,10 +1658,12 @@ nueva_ag() {  # nueva_ag <nombre> <agente> → número (en Backlog)
     --archivo "docs/agente-$1.md" --criterio "existe docs/agente-$1.md" --prueba ci | sed -n 's/^#\([0-9]*\) creada.*/\1/p'
 }
 NA=$(nueva_ag planning local); NB=$(nueva_ag etiqueta claude); NC=$(nueva_ag inactivo local); NDO=$(nueva_ag doing local)
-NA=$NA NC=$NC NDO=$NDO PYTHONPATH="$S.aglib" python3 - <<'PY' || mal "no pude preparar las tarjetas del ensayo de agente"
+NE=$(nueva_ag todo local)
+NA=$NA NC=$NC NDO=$NDO NE=$NE PYTHONPATH="$S.aglib" python3 - <<'PY' || mal "no pude preparar las tarjetas del ensayo de agente"
 import os
 from aglib import *
 poner(int(os.environ["NA"]), Estado="Planning"); poner(int(os.environ["NC"]), Estado="Planning")
+poner(int(os.environ["NE"]), Estado="Planning")
 poner(int(os.environ["NDO"]), Estado="Doing")
 PY
 python3 equipo.py demo agente > "$S.ag1.log" 2>&1 || true
@@ -1724,31 +1726,125 @@ PY
 python3 equipo.py demo agente > "$S.ag4.log" 2>&1 || true
 grep -q "0 cambio(s) aplicado(s), 0 revertido(s)" "$S.ag4.log" && ok "tras aplicar o revertir, el ciclo siguiente no repite nada" \
   || { cat "$S.ag4.log"; mal "el cambio del campo Agente se repite"; }
-NA=$NA PYTHONPATH="$S.aglib" python3 - <<'PY' || mal "no pude pasar #$NA a To Do"
+# #NE (local, en Planning, campo ya sincronizado): Óscar cambia el campo a claude y la pasa a To Do entre dos ciclos,
+# SIN `agente` por medio. Solo la sincronización que `una-vez` hace antes de leer la cola evita que la coja local o
+# que se bloquee por desajuste entre el campo «### Agente» y la etiqueta.
+NE=$NE PYTHONPATH="$S.aglib" python3 - <<'PY' || mal "no pude pasar #$NE a To Do"
 import os, sqlite3
 from aglib import *
-n = int(os.environ["NA"])
+n = int(os.environ["NE"])
 s = estado()
-for it in proyecto(s)["items"].values():  # #NA sola en la cola: nada más ocupa el turno de claude
+for it in proyecto(s)["items"].values():  # #NE sola en la cola: nada más ocupa el turno de claude
     if it["fields"].get("Estado") == "To Do" and not it["fields"].get("Bloqueo") and it.get("issue") != f"oscar/demo-app#{n}":
         it["fields"]["Estado"] = "Backlog"
-tarjeta(s, n)["fields"].update({"Estado": "To Do", "Prioridad": "P0 urgente"})
+assert tarjeta(s, n)["fields"]["Agente"] == "local" and issue(s, n)["labels"] == ["agent:local"], tarjeta(s, n)
+tarjeta(s, n)["fields"].update({"Agente": "claude", "Estado": "To Do", "Prioridad": "P0 urgente"})
 guardar(s)
 con = sqlite3.connect("proyectos/demo/estado/registro.db")
 con.execute("UPDATE tareas SET estado='bloqueada' WHERE estado='en_curso' AND issue<>?", (n,))
 con.commit()
 PY
 python3 equipo.py demo una-vez --detener-tras worktree > "$S.ag5.log" 2>&1 || true
-NA=$NA PYTHONPATH="$S.aglib" python3 - "$S.ag5.log" <<'PY' && ok "al pasar a To Do la hace claude sin Bloqueo por desajuste" || { cat "$S.ag5.log"; mal "To Do tras cambiar el agente en el tablero"; }
+NE=$NE PYTHONPATH="$S.aglib" python3 - "$S.ag5.log" <<'PY' && ok "campo cambiado y tarjeta movida a To Do entre ciclos: la hace claude sin Bloqueo por desajuste" || { cat "$S.ag5.log"; mal "To Do tras cambiar el agente en el tablero"; }
 import os, sqlite3, sys
 from aglib import *
-n = int(os.environ["NA"])
+n = int(os.environ["NE"])
 f = sqlite3.connect("proyectos/demo/estado/registro.db").execute(
     "SELECT agente, estado, causa, rama FROM tareas WHERE issue=?", (n,)).fetchone()
 assert f and f[0] == "claude" and f[1] != "bloqueada" and not f[2] and f[3] == f"agente/claude/issue-{n}", f
-campos = tarjeta(estado(), n)["fields"]
-assert not campos.get("Bloqueo") and campos["Estado"] == "Doing", campos
-assert "no coincide" not in open(sys.argv[1], encoding="utf-8").read()
+s = estado(); i = issue(s, n); campos = tarjeta(s, n)["fields"]
+assert not campos.get("Bloqueo") and campos["Estado"] == "Doing" and campos["Agente"] == "claude", campos
+assert i["labels"] == ["agent:claude"] and "### Agente\n\nclaude\n" in i["body"], (i["labels"], i["body"])
+assert sum("Agente cambiado: `local` → `claude`" in c for c in i["comments"]) == 1, i["comments"]
+t = open(sys.argv[1], encoding="utf-8").read()
+assert "no coincide" not in t and "invocando agente 'local'" not in t, t
+PY
+
+# El comentario falla después de cambiar la etiqueta, el cuerpo y el campo: queda pendiente y se publica en el
+# ciclo siguiente (aunque la tarjeta ya parezca al día), una sola vez.
+NA=$NA PYTHONPATH="$S.aglib" python3 -c "import os; from aglib import *; poner(int(os.environ['NA']), Agente='local')"
+FAKE_GH_FALLA_COMENTARIO=$NA python3 equipo.py demo agente > "$S.ag6.log" 2>&1 || true
+python3 equipo.py demo agente > "$S.ag7.log" 2>&1 || true
+python3 equipo.py demo agente > "$S.ag8.log" 2>&1 || true
+NA=$NA PYTHONPATH="$S.aglib" python3 - "$S.ag6.log" "$S.ag7.log" <<'PY' && ok "si falla el comentario del cambio de agente, se publica en el ciclo siguiente (una vez)" || { cat "$S.ag6.log" "$S.ag7.log" "$S.ag8.log"; mal "comentario del cambio de agente perdido"; }
+import json, os, sys
+from aglib import *
+n = int(os.environ["NA"])
+assert "502" in open(sys.argv[1], encoding="utf-8").read()
+assert "publicado el comentario pendiente" in open(sys.argv[2], encoding="utf-8").read()
+s = estado(); i = issue(s, n)
+assert i["labels"] == ["agent:local"] and "### Agente\n\nlocal\n" in i["body"], (i["labels"], i["body"])
+assert tarjeta(s, n)["fields"]["Agente"] == "local", tarjeta(s, n)
+assert sum("`claude` → `local`" in c for c in i["comments"]) == 1, i["comments"]
+assert "Agente cambiado: `claude` → `local`" in i["comments"][-1], i["comments"]
+ruta = "proyectos/demo/estado/agentes-tablero-comentarios.json"
+assert not os.path.exists(ruta) or f"oscar/demo-app#{n}" not in json.load(open(ruta)), open(ruta).read()
+PY
+
+# Cerrojo de agentes entre procesos: ocupado por un proceso vivo → espera y se rinde; de un proceso muerto → se retira.
+EQUIPO_IA_PROYECTO=demo python3 - "$S.cerrojo" <<'PY' && ok "cerrojo de agentes: ocupado espera y se rinde; huérfano se retira" || mal "cerrojo de agentes"
+import json, os, subprocess, sys, time
+from pathlib import Path
+import equipo as E
+C = E.C
+d = Path(sys.argv[1]); d.mkdir(exist_ok=True)
+vivo = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+try:
+    (d / C.CERROJO_AGENTES).write_text(json.dumps({"pid": vivo.pid}))
+    t0 = time.monotonic()
+    try:
+        with C.cerrojo_agentes(d, espera=0.6):
+            raise AssertionError("entró con el cerrojo ocupado")
+    except TimeoutError:
+        pass
+    assert time.monotonic() - t0 >= 0.5 and (d / C.CERROJO_AGENTES).exists()
+finally:
+    vivo.kill(); vivo.wait()
+with C.cerrojo_agentes(d, espera=2):  # el PID ya no existe: cerrojo huérfano
+    assert json.loads((d / C.CERROJO_AGENTES).read_text())["pid"] == os.getpid()
+assert not (d / C.CERROJO_AGENTES).exists()
+PY
+
+# Sin ningún agente activo: el campo se queda con una sola opción que no es un agente, se vacía en todas las
+# tarjetas y elegir un agente (desde una opción antigua que aún se ve en el móvil) se revierte con comentario.
+cp proyectos/demo/config.json "$S.demo-ag.json"
+EQUIPO_IA_PROYECTO=demo python3 - <<'PY' || mal "no pude desactivar los agentes"
+import json
+import equipo as E
+ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
+for n in E.C.agentes_activos(E.cfg_proyecto("demo")["agentes"]):
+    c["agentes"].setdefault(n, {})["activo"] = False
+json.dump(c, open(ruta, "w"), indent=2)
+assert not E.C.agentes_activos(E.cfg_proyecto("demo")["agentes"])
+PY
+python3 equipo.py demo agente > "$S.ag9.log" 2>&1 || true
+NC=$NC PYTHONPATH="$S.aglib" python3 -c "import os; from aglib import *; poner(int(os.environ['NC']), Agente='claude')"
+python3 equipo.py demo agente > "$S.ag10.log" 2>&1 || true
+python3 equipo.py demo agente "$NC" claude > "$S.ag11.log" 2>&1 && R11=0 || R11=$?
+cp "$S.demo-ag.json" proyectos/demo/config.json
+NC=$NC R11=$R11 PYTHONPATH="$S.aglib" python3 - "$S.ag10.log" "$S.ag11.log" <<'PY' && ok "sin agentes activos: el campo no ofrece agentes y lo elegido se revierte con comentario" || { cat "$S.ag9.log" "$S.ag10.log" "$S.ag11.log"; mal "campo Agente con todos los agentes desactivados"; }
+import os, sys
+from aglib import *
+n = int(os.environ["NC"])
+s = estado(); p = proyecto(s)
+campo = next(f for f in p.get("campos_extra", []) if f["name"] == "Agente")
+assert [o["name"] for o in campo["options"]] == ["sin-agente-activo"], campo
+assert all(not it["fields"].get("Agente") for it in p["items"].values()), [it["fields"] for it in p["items"].values()]
+i = issue(s, n)
+assert i["labels"] == ["agent:local"] and "### Agente\n\nlocal\n" in i["body"], (i["labels"], i["body"])
+assert "El agente sigue siendo" in i["comments"][-1] and "`claude` no es un agente activo" in i["comments"][-1], i["comments"]
+assert "1 revertido(s)" in open(sys.argv[1], encoding="utf-8").read()
+assert os.environ["R11"] != "0" and "no es un agente activo" in open(sys.argv[2], encoding="utf-8").read()
+PY
+python3 equipo.py demo agente > "$S.ag12.log" 2>&1 || true
+NB=$NB NC=$NC PYTHONPATH="$S.aglib" python3 - <<'PY' && ok "al reactivar los agentes, el campo vuelve a ofrecerlos y se rellena según la etiqueta" || { cat "$S.ag12.log"; mal "campo Agente tras reactivar los agentes"; }
+import os
+from aglib import *
+s = estado(); p = proyecto(s)
+campo = next(f for f in p.get("campos_extra", []) if f["name"] == "Agente")
+assert "claude" in [o["name"] for o in campo["options"]] and "sin-agente-activo" not in [o["name"] for o in campo["options"]], campo
+assert tarjeta(s, int(os.environ["NC"]))["fields"]["Agente"] == "local", tarjeta(s, int(os.environ["NC"]))
+assert tarjeta(s, int(os.environ["NB"]))["fields"]["Agente"] == "local", tarjeta(s, int(os.environ["NB"]))
 PY
 
 PUERTO=8793

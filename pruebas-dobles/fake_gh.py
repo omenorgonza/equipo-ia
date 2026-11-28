@@ -471,6 +471,10 @@ elif a[:2] == ["issue", "edit"]:
     if opt(a, "--body-file"):
         i["body"] = body(a)
 elif a[:2] == ["issue", "comment"]:
+    # FAKE_GH_FALLA_COMENTARIO=<número>: GitHub rechaza el comentario en esa issue (caída de red, permisos…)
+    if os.environ.get("FAKE_GH_FALLA_COMENTARIO") == a[2]:
+        sys.stderr.write("HTTP 502: Bad Gateway\n")
+        sys.exit(1)
     s["issues"][clave(repo_de(a), int(a[2]))]["comments"].append(body(a))
 elif a[:2] == ["pr", "list"]:
     repo, h, autor, st = repo_de(a), opt(a, "--head"), opt(a, "--author"), (opt(a, "--state") or "open").upper()

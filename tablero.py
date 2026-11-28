@@ -82,16 +82,17 @@ def enlazar_repos(cfg: dict, owner: str, numero: int) -> None:
 def campo_agente(cfg: dict, t: T.Tablero) -> None:
     """Campo Agente (single select): una opción por agente activo. Se cambia en el tablero o en el panel."""
     activos = C.agentes_activos(cfg.get("agentes"))
-    if not activos:
-        print(f"Campo {T.CAMPO_AGENTE}: no hay agentes activos; no lo creo")
-        return
     try:
-        hecho = t.asegurar_opciones(T.CAMPO_AGENTE, activos)
+        if not activos and T.CAMPO_AGENTE not in t.campos:
+            print(f"Campo {T.CAMPO_AGENTE}: no hay agentes activos; no lo creo")
+            return
+        # Sin agentes activos, una sola opción que no es un agente: el coordinador revierte si se elige.
+        hecho = t.asegurar_opciones(T.CAMPO_AGENTE, activos or [T.SIN_AGENTE])
     except T.ErrorTablero as e:
         print(f"Campo {T.CAMPO_AGENTE}: no pude crearlo ({str(e)[:200]}); el coordinador lo reintenta en cada ciclo")
         return
     print(f"Campo {T.CAMPO_AGENTE}: {'creado' if hecho == 'creado' else 'opciones al día' if hecho else 'ya existe'} "
-          f"({', '.join(activos)})")
+          f"({', '.join(activos) or 'ningún agente activo'})")
 
 
 def cmd_crear(a) -> None:

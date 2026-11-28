@@ -21,6 +21,7 @@ PRIORIDADES = ["P0 urgente", "P1 alta", "P2 normal", "P3 baja"]
 CAMPO_ESTADO, CAMPO_PRIORIDAD, CAMPO_BLOQUEO, CAMPO_SIGUIENTE = "Estado", "Prioridad", "Bloqueo", "Siguiente"
 CAMPOS_TEXTO = (CAMPO_BLOQUEO, CAMPO_SIGUIENTE)
 CAMPO_AGENTE = "Agente"
+SIN_AGENTE = "sin-agente-activo"   # única opción del campo Agente si no queda ningún agente activo (se revierte)
 AGENTE_EDITABLE = (BACKLOG, PLANNING, TODO)  # columnas en las que el agente de una tarjeta se puede cambiar
 NOMBRE_AGENTE_OK = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 

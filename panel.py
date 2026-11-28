@@ -288,14 +288,19 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
         """Tarjetas y siguiente paso de la misma lectura. Con el equipo parado, el panel mantiene al día los campos
         Agente y Siguiente del tablero (solo escribe lo que cambia); con el equipo en marcha lo hace el coordinador."""
         t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
-        its = t.items()
         parado = not E.coordinador_activo(nombre)
+        its = None
         if parado and cfg.get("fuente_cola") == "tablero":
+            dir_estado = E.PROYECTOS / nombre / "estado"
             try:  # un cambio de agente hecho en el tablero (móvil) se aplica aunque el equipo no esté en marcha
-                C.sincronizar_agentes(t, its, cfg.get("agentes") or {}, E.gh_bin(),
-                                      E.PROYECTOS / nombre / "estado" / C.RECUERDO_AGENTES, repos, avisar=lambda _m: None)
-            except Exception:  # noqa: BLE001 — sin sincronizar, el panel sigue mostrando la etiqueta
+                with C.cerrojo_agentes(dir_estado, espera=5):  # las tarjetas se leen con el cerrojo
+                    its = t.items()
+                    C.sincronizar_agentes(t, its, cfg.get("agentes") or {}, E.gh_bin(),
+                                          dir_estado / C.RECUERDO_AGENTES, repos, avisar=lambda _m: None)
+            except Exception:  # noqa: BLE001 — sin sincronizar (o con el cerrojo ocupado), muestra la etiqueta
                 pass
+        if its is None:
+            its = t.items()
         try:
             escribir = parado and T.CAMPO_SIGUIENTE in t.campos
             rec = t.siguiente(repos, escribir=escribir, items=its)

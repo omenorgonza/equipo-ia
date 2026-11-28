@@ -64,6 +64,18 @@ activos: `python3 equipo.py <proyecto> agente` (sin argumentos) o `preparar` cre
 y sincronizan todas las tarjetas; el coordinador lo hace también al empezar cada ciclo, y solo escribe lo que
 cambia. Para saber quién cambió qué, guarda el valor sincronizado en `proyectos/<p>/estado/agentes-tablero.json`.
 
+Detalles que evitan sorpresas:
+
+- **Sin carreras con el coordinador**: el coordinador, el panel y `agente` comparten un cerrojo
+  (`estado/agentes-tablero.lock`). El coordinador lo mantiene desde la sincronización del ciclo hasta mover a Doing
+  las tareas que elige, y el panel lee y valida la tarjeta con el cerrojo puesto: un cambio iniciado en To Do no
+  puede tocar una tarea que el coordinador ya ha pasado a Doing (el panel espera un momento o avisa de que lo
+  intentes otra vez).
+- **El comentario no se pierde**: se anota en `estado/agentes-tablero-comentarios.json` antes de escribir nada; si
+  GitHub falla al publicarlo, el ciclo siguiente lo publica (una vez) mientras la etiqueta siga diciendo ese agente.
+- **Sin agentes activos**: el campo se queda con una sola opción, `sin-agente-activo` (GitHub no admite un campo de
+  selección vacío), se vacía en todas las tarjetas y lo que se elija se deshace con un comentario.
+
 ## Plantilla del tablero
 
 Los tableros nuevos se **copian del tablero de ensayo** (vistas «Tablero» y «Planning», campos Estado,

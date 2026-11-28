@@ -598,9 +598,12 @@ def preparar_proyecto(nombre: str, log=print) -> list[str]:
     try:  # campo Agente del tablero: sus opciones son los agentes activos (también los añadidos en el config.json)
         t = T.Tablero(tablero["owner"], tablero["numero"], tablero.get("owner_tipo", "user"), gh_bin())
         activos = C.agentes_activos(cfg.get("agentes"))
-        hecho = t.asegurar_opciones(T.CAMPO_AGENTE, activos)
-        log(f"Campo {T.CAMPO_AGENTE} del tablero: {'creado' if hecho == 'creado' else 'opciones cambiadas' if hecho else 'ya estaba'}"
-            f" ({', '.join(activos)})")
+        if not activos and T.CAMPO_AGENTE not in t.campos:
+            log(f"Campo {T.CAMPO_AGENTE} del tablero: no hay agentes activos; no lo creo")
+        else:  # sin agentes activos, una sola opción que no es un agente (el coordinador revierte si se elige)
+            hecho = t.asegurar_opciones(T.CAMPO_AGENTE, activos or [T.SIN_AGENTE])
+            log(f"Campo {T.CAMPO_AGENTE} del tablero: {'creado' if hecho == 'creado' else 'opciones cambiadas' if hecho else 'ya estaba'}"
+                f" ({', '.join(activos) or 'ningún agente activo'})")
     except Exception as e:  # noqa: BLE001 — sin el campo, el agente se sigue cambiando con la etiqueta
         pendientes.append(f"Campo {T.CAMPO_AGENTE} del tablero: {str(e)[:200]} (repite `preparar` cuando se pueda)")
     log("Pendiente para Óscar:\n  - " + "\n  - ".join(pendientes) if pendientes else "Nada pendiente.")
