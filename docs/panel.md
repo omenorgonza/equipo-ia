@@ -45,7 +45,9 @@ aplica en el ciclo siguiente. Detalles en
 
 Si el proyecto tiene `cadena_escalado`, la casilla dice «Escalar por la cadena (local → local-plus → claude)»; la
 cadena se cambia en el `config.json` ([Cadena de escalado](agentes-y-lecciones.md#cadena-de-escalado)). El selector
-de agente de «Nueva tarea» lista los agentes activos del proyecto.
+de agente de «Nueva tarea» solo ofrece `claude` y `local` (los que admite `tablero.py nueva`), y solo si están
+activos en el proyecto. Para una tarea de otro motor (`codex`, `local-plus`…), créala como `claude` y cámbiale
+después la etiqueta `agent:` y el campo «Agente» del cuerpo de la issue.
 
 ## Guardar TABLERO_TOKEN
 
