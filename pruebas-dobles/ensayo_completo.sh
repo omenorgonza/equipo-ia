@@ -1150,12 +1150,25 @@ assert post("color", {"color": otro})["ok"] and post("escalado", {"activo": True
 c = json.load(open("proyectos/demo/config.json"))
 assert c["color"] == otro and c["escalar_fallos"] is True and c["fallos_para_escalar"] == 4, c
 for ronda in range(5):  # a la vez: el panel atiende cada petición en su hilo
-    color, fallos = E.PALETA[ronda], ronda % 5 + 1
-    hilos = [threading.Thread(target=post, args=("color", {"color": color})),
-             threading.Thread(target=post, args=("escalado", {"activo": ronda % 2 == 0, "fallos": fallos}))]
+    # Cada ronda cambia los tres valores respecto a lo que ya hay en config.json:
+    # así una petición fallida no puede pasar por buena dejando el valor anterior.
+    color = next(x for x in E.PALETA[ronda:] + E.PALETA[:ronda] if x != c["color"])
+    fallos = next(n for n in (ronda % 5 + 1, (ronda + 1) % 5 + 1) if n != c["fallos_para_escalar"])
+    activo = not c["escalar_fallos"]
+    resultados, errores = {}, {}
+    def lanzar(accion, cuerpo):
+        try:
+            resultados[accion] = post(accion, cuerpo)
+        except Exception as e:  # una excepción en el hilo no debe perderse
+            errores[accion] = repr(e)
+    hilos = [threading.Thread(target=lanzar, args=("color", {"color": color})),
+             threading.Thread(target=lanzar, args=("escalado", {"activo": activo, "fallos": fallos}))]
     [h.start() for h in hilos]; [h.join() for h in hilos]
+    assert not errores, (ronda, errores)
+    assert set(resultados) == {"color", "escalado"}, (ronda, resultados)
+    assert all(r.get("ok") is True for r in resultados.values()), (ronda, resultados)
     c = json.load(open("proyectos/demo/config.json"))
-    assert c["color"] == color and c["fallos_para_escalar"] == fallos and c["escalar_fallos"] is (ronda % 2 == 0), (ronda, c)
+    assert c["color"] == color and c["fallos_para_escalar"] == fallos and c["escalar_fallos"] is activo, (ronda, c)
 assert not glob.glob("proyectos/demo/*.tmp") and not glob.glob("proyectos/demo/.*.tmp"), os.listdir("proyectos/demo")
 PY
 cp "$S.demo-config-panel.bak" proyectos/demo/config.json
