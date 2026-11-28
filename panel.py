@@ -276,7 +276,7 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
               "activo": E.coordinador_activo(nombre), "columnas": {e: 0 for e in T.ESTADOS}, "atencion": [],
               "tarjetas": {}, "error": None, "pruebas": pruebas_proyecto(cfg), "progreso": [],
               "siguiente": siguiente_json({}), "escalado": escalado_proyecto(cfg),
-              "agentes": agentes_proyecto(cfg)}
+              "agentes": agentes_proyecto(cfg), "agentes_tablero": C.agentes_activos(cfg.get("agentes"))}
     try:
         prog = progreso_tareas(nombre, cfg)
     except Exception:  # noqa: BLE001 — el panel nunca se cae por el progreso
@@ -285,12 +285,24 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
     vistos: set[int] = set()
 
     def items():
-        """Tarjetas y siguiente paso de la misma lectura. Con el equipo parado, el panel mantiene al día el campo
-        Siguiente del tablero (solo escribe lo que cambia); con el equipo en marcha lo hace el coordinador."""
+        """Tarjetas y siguiente paso de la misma lectura. Con el equipo parado, el panel mantiene al día los campos
+        Agente y Siguiente del tablero (solo escribe lo que cambia); con el equipo en marcha lo hace el coordinador."""
         t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
-        its = t.items()
+        parado = not E.coordinador_activo(nombre)
+        its = None
+        if parado and cfg.get("fuente_cola") == "tablero":
+            dir_estado = E.PROYECTOS / nombre / "estado"
+            try:  # un cambio de agente hecho en el tablero (móvil) se aplica aunque el equipo no esté en marcha
+                with C.cerrojo_agentes(dir_estado, espera=5):  # las tarjetas se leen con el cerrojo
+                    its = t.items()
+                    C.sincronizar_agentes(t, its, cfg.get("agentes") or {}, E.gh_bin(),
+                                          dir_estado / C.RECUERDO_AGENTES, repos, avisar=lambda _m: None)
+            except Exception:  # noqa: BLE001 — sin sincronizar (o con el cerrojo ocupado), muestra la etiqueta
+                pass
+        if its is None:
+            its = t.items()
         try:
-            escribir = not E.coordinador_activo(nombre) and T.CAMPO_SIGUIENTE in t.campos
+            escribir = parado and T.CAMPO_SIGUIENTE in t.campos
             rec = t.siguiente(repos, escribir=escribir, items=its)
         except Exception as e:  # noqa: BLE001 — sin recomendación, el resto del panel sigue
             rec = {"error": str(e)[:300]}
@@ -300,6 +312,7 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
         t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
         info = t.info()
         return {"nombres": [v["name"] for v in info["views"]["nodes"]], "agrupacion": T.aviso_agrupacion(info),
+                "agente_visible": T.aviso_agente_visible(info),
                 "sin_siguiente": T.CAMPO_SIGUIENTE not in {f["name"] for f in info["fields"]["nodes"] if f}}
 
     if tb.get("numero"):
@@ -311,6 +324,8 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
         salida["siguiente"] = siguiente_json(rec)
         prs = prs_registro(nombre)
         indice = {((x["repo"] or "").lower(), x["numero"]): x for x in its}
+        etiqueta_de = {a: c["etiqueta"] for a, c in (cfg.get("agentes") or {}).items()
+                       if isinstance(c, dict) and isinstance(c.get("etiqueta"), str)}
         grupos: dict[str, list] = {}
         for it in its:
             if not it["abierta"] and it["estado"] not in (T.DONE, T.PRO):
@@ -321,7 +336,9 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
             tarjeta = {"numero": it["numero"], "titulo": it["titulo"], "url": it["url"], "prioridad": it["prioridad"],
                        "bloqueo": it["bloqueo"], "pr": prs.get(it["numero"]), "repo": it["repo"],
                        "siguiente": (rec.get("tarjetas") or {}).get((it["repo"].lower(), it["numero"]), ""),
-                       "agente": next((x.split(":")[1] for x in it["etiquetas"] if x.startswith("agent:")), None)}
+                       "agente": agente_tarjeta(it, etiqueta_de),
+                       "agente_editable": bool(salida["agentes_tablero"]) and it["abierta"]
+                       and it["estado"] in T.AGENTE_EDITABLE and cfg.get("fuente_cola") == "tablero"}
             pg = prog.get(it["numero"]) if (not repo_cola or (it["repo"] or "").lower() == repo_cola) else None
             if pg is not None:
                 vistos.add(it["numero"])
@@ -371,6 +388,9 @@ def estado_proyecto(nombre: str, forzar=False) -> dict:
             if vs.get("agrupacion"):
                 salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "url": tb.get("url"),
                                            "texto": vs["agrupacion"]})
+            if vs.get("agente_visible"):
+                salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "url": tb.get("url"),
+                                           "texto": vs["agente_visible"]})
     else:
         salida["atencion"].append({"nivel": "media", "tipo": "instalacion", "texto": "El proyecto aún no tiene tablero",
                                    "url": None})
@@ -468,18 +488,47 @@ def reintentar(nombre: str, numero: int) -> dict:
     return {"ok": r.returncode == 0, "mensaje": (r.stdout or r.stderr).strip()[-300:]}
 
 
-AGENTES_TAREA = ("claude", "local")  # los que admite `tablero.py nueva --agente` (sus `choices`)
+AGENTES_TAREA = ("claude", "local")  # proyecto antiguo sin agentes en la config: los de siempre
 PRIORIDADES_TAREA = ("P0", "P1", "P2", "P3")
 
 
 def agentes_proyecto(cfg: dict) -> list[str]:
-    """Agentes con los que «Nueva tarea» puede crear la tarjeta: los activos del proyecto (equipo.json →
-    agentes, con lo que cambie su config.json) que además admite `tablero.py nueva`. Los motores nuevos
-    (codex, local-plus…) no entran: para ellos se crea la tarea como claude y se cambia la etiqueta."""
+    """Agentes con los que «Nueva tarea» puede crear la tarjeta: los activos del proyecto (equipo.json → agentes, con
+    lo que cambie su config.json), los mismos que admite `tablero.py nueva --agente`."""
     ags = cfg.get("agentes")
     if not isinstance(ags, dict) or not ags:
-        return list(AGENTES_TAREA)  # proyecto antiguo sin agentes en la config: los de siempre
-    return [n for n in AGENTES_TAREA if isinstance(ags.get(n), dict) and ags[n].get("activo", True)]
+        return list(AGENTES_TAREA)
+    return C.agentes_activos(ags)
+
+
+def agente_tarjeta(it: dict, etiqueta_de: dict[str, str]) -> str | None:
+    """Agente asignado según su etiqueta (la fuente de verdad); sin agentes en la config, el prefijo «agent:»."""
+    if etiqueta_de:
+        return T.agente_por_etiquetas(it["etiquetas"], etiqueta_de)
+    return next((x.split(":", 1)[1] for x in it["etiquetas"] if x.startswith("agent:")), None)
+
+
+def cambiar_agente(nombre: str, d: dict) -> tuple[dict, int]:
+    """POST /api/proyecto/<n>/agente {numero, agente, repo?}: reutiliza `coordinador.py agente` (sus validaciones:
+    tarjeta en Backlog, Planning o To Do y agente activo). Cambia la etiqueta, el campo Agente y deja un comentario."""
+    numero, agente, repo = d.get("numero"), d.get("agente"), d.get("repo")
+    if isinstance(numero, bool) or not isinstance(numero, int) or numero <= 0:
+        return {"ok": False, "error": "«numero» debe ser el número de la issue"}, 400
+    cfg = E.cfg_proyecto(nombre)
+    activos = C.agentes_activos(cfg.get("agentes"))
+    if not isinstance(agente, str) or agente not in activos:
+        return {"ok": False, "error": f"Agente no válido: {agente} (activos: {', '.join(activos) or 'ninguno'})"}, 400
+    repos = [r for r in (cfg.get("repos") or [cfg.get("repo")]) if r]
+    if repo is not None and (not isinstance(repo, str) or repo.lower() not in {r.lower() for r in repos}):
+        return {"ok": False, "error": f"Repo no válido: {repo}"}, 400
+    args = ["agente", str(numero), agente] + ([f"--repo={repo}"] if repo else [])
+    r = E.script(nombre, "coordinador.py", *args, capturar=True, timeout=180)
+    texto = (r.stdout or r.stderr or "").strip().splitlines()
+    with _cache_lock:
+        _cache.clear()
+    if r.returncode != 0:
+        return {"ok": False, "error": texto[-1] if texto else "coordinador.py agente falló"}, 400
+    return {"ok": True, "numero": numero, "agente": agente, "mensaje": texto[-1] if texto else f"#{numero}: {agente}"}, 200
 
 
 def _lineas(valor) -> list[str]:
@@ -505,8 +554,7 @@ def crear_tarea(nombre: str, d: dict) -> tuple[dict, int]:
     validos = agentes_proyecto(E.cfg_proyecto(nombre)) if agente else []
     if agente and agente not in validos:
         return {"error": f"Agente no válido para «Nueva tarea»: {agente} "
-                         f"(usa {', '.join(validos) or 'ninguno: no hay claude ni local activos'}; "
-                         "para otro motor, créala como claude y cambia su etiqueta agent:)"}, 400
+                         f"(usa {', '.join(validos) or 'ninguno: no hay agentes activos'})"}, 400
     prioridad = (d.get("prioridad") or "P2").strip()
     if prioridad not in PRIORIDADES_TAREA:
         return {"error": f"Prioridad no válida: {prioridad}"}, 400
@@ -717,7 +765,11 @@ class Manejador(BaseHTTPRequestHandler):
             if m.group(1) not in E.proyectos():
                 return self._json({"error": "proyecto desconocido"}, 404)
             return self._json(*crear_tarea(m.group(1), cuerpo))
-
+        m = re.match(r"^/api/proyecto/([a-z0-9-]+)/agente$", ruta)
+        if m:
+            if m.group(1) not in E.proyectos():
+                return self._json({"error": "proyecto desconocido"}, 404)
+            return self._json(*cambiar_agente(m.group(1), cuerpo))
 
         m = re.match(r"^/api/proyecto/([a-z0-9-]+)/secreto$", ruta)
         if m:

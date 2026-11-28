@@ -79,6 +79,31 @@ def enlazar_repos(cfg: dict, owner: str, numero: int) -> None:
         gh(cfg, "project", "link", str(numero), "--owner", owner, "--repo", repo, comprobar=False)
 
 
+def campo_agente(cfg: dict, t: T.Tablero) -> None:
+    """Campo Agente (single select): una opción por agente activo. Se cambia en el tablero o en el panel."""
+    activos = C.agentes_activos(cfg.get("agentes"))
+    try:
+        if not activos and T.CAMPO_AGENTE not in t.campos:
+            print(f"Campo {T.CAMPO_AGENTE}: no hay agentes activos; no lo creo")
+            return
+        # Sin agentes activos, una sola opción que no es un agente: el coordinador revierte si se elige.
+        hecho = t.asegurar_opciones(T.CAMPO_AGENTE, activos or [T.SIN_AGENTE])
+    except T.ErrorTablero as e:
+        print(f"Campo {T.CAMPO_AGENTE}: no pude crearlo ({str(e)[:200]}); el coordinador lo reintenta en cada ciclo")
+        return
+    print(f"Campo {T.CAMPO_AGENTE}: {'creado' if hecho == 'creado' else 'opciones al día' if hecho else 'ya existe'} "
+          f"({', '.join(activos) or 'ningún agente activo'})")
+    # GitHub deja el campo nuevo oculto en las vistas que ya existen y su API no permite mostrarlo: se avisa del paso
+    # manual (verificar y el panel lo siguen recordando hasta que se haga).
+    t._campos = None
+    try:
+        aviso = T.aviso_agente_visible(t.info())
+    except T.ErrorTablero as e:
+        aviso = f"No pude comprobar si se ve en la vista «{T.VISTA_TABLERO}» ({str(e)[:200]}): {T.ARREGLO_AGENTE_VISIBLE}"
+    if aviso:
+        print(f"  ⚠ PASO MANUAL (1 min): {aviso}")
+
+
 def cmd_crear(a) -> None:
     cfg = C.cargar_config()
     owner = a.owner or cfg["repo"].split("/")[0]
@@ -111,6 +136,8 @@ def cmd_crear(a) -> None:
             args += ["--single-select-options", opciones]
         gh(cfg, *args)
         print(f"Campo {nombre}: creado")
+    t._campos = None
+    campo_agente(cfg, t)
     enlazar_repos(cfg, owner, numero)
     t._campos = None
     cmd_verificar(a)
@@ -162,6 +189,12 @@ def cmd_verificar(_a) -> None:
         print(f"  {nombre}: {'texto' if nombre in campos else 'NO EXISTE'}")
     if T.CAMPO_SIGUIENTE not in campos:
         problemas.append(f"Falta el campo {T.CAMPO_SIGUIENTE}: python3 tablero.py siguiente lo crea y lo rellena")
+    opciones = [o["name"] for o in campos.get(T.CAMPO_AGENTE, {}).get("options", [])]
+    activos = C.agentes_activos(cfg.get("agentes"))
+    print(f"  {T.CAMPO_AGENTE}: {opciones if T.CAMPO_AGENTE in campos else 'NO EXISTE'}")
+    if opciones != activos:
+        problemas.append(f"El campo {T.CAMPO_AGENTE} no tiene como opciones los agentes activos ({', '.join(activos)}): "
+                         "python3 coordinador.py agente (o el siguiente ciclo del equipo) lo crea o lo ajusta")
     vistas = {v["name"]: v["layout"] for v in info["views"]["nodes"]}
     print(f"  Vistas: {vistas}")
     for v in info["views"]["nodes"]:
@@ -171,6 +204,9 @@ def cmd_verificar(_a) -> None:
         if nombre not in vistas:
             problemas.append(f"Falta la vista «{nombre}» (manual, 1 min): {como}")
     aviso = T.aviso_agrupacion(info)
+    if aviso:
+        problemas.append(aviso)
+    aviso = T.aviso_agente_visible(info)
     if aviso:
         problemas.append(aviso)
     print("\nAcceso con tu identidad local:")
@@ -306,6 +342,9 @@ def cmd_nueva(a) -> None:
     t = cfg_tablero(cfg)
     if a.prueba == "ci" and not (cfg.get("ci") or {}).get("checks"):
         sys.exit("Este proyecto no tiene CI configurada como juez (ci.checks en su config.json).")
+    activos = C.agentes_activos(cfg.get("agentes"))
+    if a.agente and a.agente not in activos:
+        sys.exit(f"--agente debe ser un agente activo del proyecto: {', '.join(activos) or 'no hay ninguno'}")
     if a.prueba and a.prueba != "ci" and a.prueba not in cfg["pruebas"]:
         sys.exit(f"--prueba debe ser una clave de config.json → pruebas: {', '.join(cfg['pruebas'])}")
     completa = bool(a.agente and a.archivo and a.criterio and a.prueba)
@@ -360,7 +399,7 @@ def main() -> None:
                       "--criterio \"media([2,4]) == 3\" --criterio \"lista vacía → ValueError\" --prueba unit --prioridad P2 --todo")
     x.add_argument("titulo")
     x.add_argument("--objetivo", help="Descripción (por defecto, el título)")
-    x.add_argument("--agente", choices=["claude", "local"])
+    x.add_argument("--agente", help="Agente activo del proyecto (claude, local, codex, local-plus…)")
     x.add_argument("--archivo", action="append", help="Patrón de archivo permitido (repetible)")
     x.add_argument("--criterio", action="append", help="Criterio de aceptación (repetible)")
     x.add_argument("--prueba", help="Clave de config.json → pruebas (p. ej. unit) o «ci» para usar la CI del proyecto")

@@ -31,6 +31,8 @@ python3 equipo.py family-finance parar        # parada suave: termina la tarea e
 **Escalado automático al senior**: actívalo y ajústalo por proyecto desde el panel o el `config.json`
 ([cómo](docs/agentes-y-lecciones.md#activar-y-ajustar-el-escalado)). **Motores del equipo**: Codex como revisor
 o autor, un segundo agente local, cadena de escalado y turnos de GPU ([cómo](docs/agentes-y-lecciones.md#motores-del-equipo)).
+**Cambiar el agente de una tarea** (en Backlog, Planning o To Do): campo «Agente» del tablero (también en el
+móvil), desplegable del panel o etiqueta `agent:*` ([cómo](docs/tablero.md#cambiar-el-agente-de-una-tarea)).
 
 ## Documentación
 

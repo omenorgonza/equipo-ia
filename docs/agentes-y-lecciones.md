@@ -133,8 +133,8 @@ con el sandbox `workspace-write` en su worktree y sigue el camino de siempre: co
 revisor** va con `--sandbox read-only`, sin aprobaciones automáticas ni sesiones anteriores; si aun así escribe, o
 lo intenta (un evento `file_change`), la ronda no cuenta y se descartan sus cambios.
 
-> `tablero.py nueva --agente` todavía solo acepta `claude` y `local`: para una tarea de Codex, crea la tarjeta y
-> cambia su etiqueta a `agent:codex` y su campo **Agente** a `codex`.
+> Para una tarea de Codex: `tablero.py nueva --agente codex` (admite cualquier agente activo), el desplegable del
+> panel o el campo Agente del tablero ([Cambiar el agente de una tarea](tablero.md#cambiar-el-agente-de-una-tarea)).
 
 ### Revisores y reservas
 

@@ -626,7 +626,7 @@ def turnos():  # invocaciones de opencode (fake_agente --file) en esta issue
 PY
 nueva_motor() {  # nueva_motor <nombre> <agente> <marcas del objetivo> → número de la issue
   local agente=$2 n
-  [ "$2" = codex ] || [ "$2" = local-plus ] && agente=claude   # tablero.py nueva solo admite claude y local
+  [ "$2" = codex ] || [ "$2" = local-plus ] && agente=claude   # se crea como claude y se cambia la etiqueta (y el cuerpo) a mano
   n=$(python3 equipo.py demo tablero nueva "Motor $1" --agente "$agente" \
     --objetivo "Crea el archivo docs/$1.md con un título. $3" \
     --archivo "docs/$1.md" --criterio "existe docs/$1.md" --prueba ci --todo | sed -n 's/^#\([0-9]*\) creada.*/\1/p')
@@ -1636,6 +1636,523 @@ for r in rotos:
     print("      roto:", r)
 check(total > 0 and not rotos, f"enlaces relativos entre README.md y docs/*.md ({total} revisados, {len(rotos)} rotos)")
 sys.exit(1 if fallos else 0)
+PY
+
+echo "== 5f. Agente asignado: campo «Agente» del tablero ↔ etiqueta agent:*, y desplegable del panel"
+mkdir -p "$S.aglib"
+cat > "$S.aglib/aglib.py" <<'PY'
+import json, os, sqlite3
+ST = os.environ["FAKE_GH_STATE"]
+def estado(): return json.load(open(ST))
+def guardar(s): json.dump(s, open(ST, "w"), indent=1)
+def proyecto(s): return [p for p in s["projects"].values() if p["title"] == "Equipo IA · demo"][0]
+def tarjeta(s, n):
+    return next(it for it in proyecto(s)["items"].values() if it.get("issue") == f"oscar/demo-app#{n}")
+def issue(s, n): return s["issues"][f"oscar/demo-app#{n}"]
+def poner(n, **campos):  # simula a Óscar cambiando campos de la tarjeta en el tablero (web o móvil)
+    s = estado(); tarjeta(s, n)["fields"].update(campos); guardar(s)
+def escrituras(): return estado().get("escrituras", {}).get("Agente", 0)
+PY
+nueva_ag() {  # nueva_ag <nombre> <agente> → número (en Backlog)
+  python3 equipo.py demo tablero nueva "Agente $1" --agente "$2" --objetivo "Crea el archivo docs/agente-$1.md con un título." \
+    --archivo "docs/agente-$1.md" --criterio "existe docs/agente-$1.md" --prueba ci | sed -n 's/^#\([0-9]*\) creada.*/\1/p'
+}
+NA=$(nueva_ag planning local); NB=$(nueva_ag etiqueta claude); NC=$(nueva_ag inactivo local); NDO=$(nueva_ag doing local)
+NE=$(nueva_ag todo local)
+NA=$NA NC=$NC NDO=$NDO NE=$NE PYTHONPATH="$S.aglib" python3 - <<'PY' || mal "no pude preparar las tarjetas del ensayo de agente"
+import os
+from aglib import *
+poner(int(os.environ["NA"]), Estado="Planning"); poner(int(os.environ["NC"]), Estado="Planning")
+poner(int(os.environ["NE"]), Estado="Planning")
+poner(int(os.environ["NDO"]), Estado="Doing")
+PY
+python3 equipo.py demo agente > "$S.ag1.log" 2>&1 || true
+E1=$(PYTHONPATH="$S.aglib" python3 -c "from aglib import *; print(escrituras())")
+PYTHONPATH="$S.aglib" EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "campo Agente rellenado en todas las tarjetas según su etiqueta (opciones: solo agentes activos)" || { cat "$S.ag1.log"; mal "campo Agente sin rellenar"; }
+import equipo as E, tablero_lib as T
+from aglib import *
+cfg = E.cfg_proyecto("demo")
+activos = E.C.agentes_activos(cfg["agentes"])
+etiqueta_de = {a: c["etiqueta"] for a, c in cfg["agentes"].items() if c.get("etiqueta")}
+assert "codex" not in activos and {"claude", "local"} <= set(activos), activos
+s = estado(); p = proyecto(s)
+campo = next(f for f in p.get("campos_extra", []) if f["name"] == "Agente")
+assert [o["name"] for o in campo["options"]] == activos, campo
+vistas = 0
+for it in p["items"].values():
+    i = s["issues"].get(it.get("issue", ""))
+    if not i:
+        continue
+    esperado = T.agente_por_etiquetas(i["labels"], etiqueta_de)
+    esperado = esperado if esperado in activos else None
+    assert (it["fields"].get("Agente") or None) == esperado, (i["number"], i["labels"], it["fields"])
+    vistas += 1
+assert vistas >= 10, vistas
+PY
+# Visible en las tarjetas: GitHub deja el campo nuevo oculto en las vistas que ya existían y su API no deja mostrarlo.
+# `verificar` (y el panel) lo detectan leyendo los campos visibles de la vista «Tablero» y dan el paso manual.
+PYTHONPATH="$S.aglib" python3 -c "
+from aglib import *
+s = estado(); v = next(v for v in proyecto(s)['views'] if v['name'] == 'Tablero'); v['ocultos'] = ['Agente']; guardar(s)"
+python3 equipo.py demo tablero verificar > "$S.agv1.log" 2>&1 || true
+PYTHONPATH="$S.aglib" python3 -c "
+from aglib import *
+s = estado(); v = next(v for v in proyecto(s)['views'] if v['name'] == 'Tablero'); v['ocultos'] = []; guardar(s)"
+python3 equipo.py demo tablero verificar > "$S.agv2.log" 2>&1 || true
+PYTHONPATH="$S.aglib" EQUIPO_IA_PROYECTO=demo python3 - "$S.agv1.log" "$S.agv2.log" <<'PY' && ok "campo Agente oculto en la vista «Tablero»: verificar lo avisa con el paso manual; visible, sin aviso" || { cat "$S.agv1.log" "$S.agv2.log"; mal "visibilidad del campo Agente en la vista «Tablero»"; }
+import sys
+import equipo as E, tablero_lib as T
+uno, dos = (open(x, encoding="utf-8").read() for x in sys.argv[1:3])
+assert "El campo Agente no se ve en las tarjetas de la vista «Tablero»" in uno and "Fields → marca Agente" in uno, uno
+assert "no se ve en las tarjetas" not in dos, dos
+# Un campo creado después de la vista empieza oculto en ella (como en GitHub).
+info = {"fields": {"nodes": [{"name": "Agente"}]},
+        "views": {"nodes": [{"name": "Tablero", "layout": "BOARD_LAYOUT", "fields": {"nodes": [{"name": "Title"}]}}]}}
+assert T.aviso_agente_visible(info) and T.ARREGLO_AGENTE_VISIBLE in T.aviso_agente_visible(info)
+info["views"]["nodes"][0]["fields"]["nodes"].append({"name": "Agente"})
+assert T.aviso_agente_visible(info) is None
+PY
+PYTHONPATH="$S.aglib" EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "fake_gh: un campo creado con createProjectV2Field empieza oculto en las vistas existentes" || mal "fake_gh: campos nuevos en las vistas"
+import equipo as E, tablero_lib as T
+from aglib import *
+tb = E.cfg_proyecto("demo")["tablero"]
+t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), E.gh_bin())
+assert t.asegurar_opciones("PruebaVisible", ["x"]) == "creado"
+v = next(v for v in proyecto(estado())["views"] if v["name"] == "Tablero")
+assert "PruebaVisible" in v.get("ocultos", []), v
+vista = next(v for v in t.info()["views"]["nodes"] if v["name"] == "Tablero")
+assert "PruebaVisible" not in T.campos_visibles(vista) and "Estado" in T.campos_visibles(vista), vista
+s = estado(); p = proyecto(s)
+p["campos_extra"] = [f for f in p["campos_extra"] if f["name"] != "PruebaVisible"]
+for v in p["views"]:
+    v["ocultos"] = [x for x in v.get("ocultos", []) if x != "PruebaVisible"]
+guardar(s)
+PY
+python3 equipo.py demo agente > "$S.ag2.log" 2>&1 || true
+[ "$(PYTHONPATH="$S.aglib" python3 -c "from aglib import *; print(escrituras())")" = "$E1" ] \
+  && grep -q "0 tarjeta(s) actualizada(s), 0 cambio(s) aplicado(s), 0 revertido(s)" "$S.ag2.log" \
+  && ok "sin cambios no se vuelve a escribir el campo Agente" || { cat "$S.ag2.log"; mal "escrituras repetidas del campo Agente"; }
+NA=$NA NB=$NB NC=$NC NDO=$NDO PYTHONPATH="$S.aglib" python3 - <<'PY' || mal "no pude simular los cambios en el tablero"
+import os
+from aglib import *
+poner(int(os.environ["NA"]), Agente="claude")       # Planning: local → claude desde el tablero
+poner(int(os.environ["NC"]), Agente="codex")         # agente inactivo (opción antigua que aún se ve en el tablero)
+poner(int(os.environ["NDO"]), Agente="claude")       # Doing: no se puede cambiar
+s = estado(); issue(s, int(os.environ["NB"]))["labels"] = ["agent:local"]; guardar(s)   # etiqueta cambiada a mano
+PY
+python3 equipo.py demo agente > "$S.ag3.log" 2>&1 || true
+NA=$NA NB=$NB NC=$NC NDO=$NDO PYTHONPATH="$S.aglib" python3 - "$S.ag3.log" <<'PY' && ok "tablero: cambio en Planning aplicado; etiqueta a mano gana; Doing e inactivo revertidos con comentario" || { cat "$S.ag3.log"; mal "sincronización del campo Agente"; }
+import os, sys
+from aglib import *
+na, nb, nc, nd = (int(os.environ[k]) for k in ("NA", "NB", "NC", "NDO"))
+s = estado()
+a = issue(s, na)
+assert a["labels"] == ["agent:claude"], a["labels"]
+assert "### Agente\n\nclaude\n" in a["body"] and "### Agente\n\nlocal" not in a["body"], a["body"]
+assert tarjeta(s, na)["fields"]["Agente"] == "claude" and tarjeta(s, na)["fields"]["Estado"] == "Planning"
+assert len(a["comments"]) == 1 and "Agente cambiado: `local` → `claude`" in a["comments"][0], a["comments"]
+b = issue(s, nb)
+assert tarjeta(s, nb)["fields"]["Agente"] == "local" and b["labels"] == ["agent:local"], (b["labels"], tarjeta(s, nb))
+assert "### Agente\n\nlocal\n" in b["body"] and not b["comments"], (b["body"], b["comments"])
+for n, texto in ((nc, "`codex` no es un agente activo"), (nd, "la tarjeta está en Doing")):
+    i = issue(s, n)
+    assert tarjeta(s, n)["fields"]["Agente"] == "local" and i["labels"] == ["agent:local"], (n, i["labels"], tarjeta(s, n))
+    assert "### Agente\n\nlocal\n" in i["body"], i["body"]
+    assert len(i["comments"]) == 1 and "El agente sigue siendo `local`" in i["comments"][0] and texto in i["comments"][0], i["comments"]
+t = open(sys.argv[1], encoding="utf-8").read()
+assert "1 cambio(s) aplicado(s), 2 revertido(s)" in t, t
+PY
+python3 equipo.py demo agente > "$S.ag4.log" 2>&1 || true
+grep -q "0 cambio(s) aplicado(s), 0 revertido(s)" "$S.ag4.log" && ok "tras aplicar o revertir, el ciclo siguiente no repite nada" \
+  || { cat "$S.ag4.log"; mal "el cambio del campo Agente se repite"; }
+# #NE (local, en Planning, campo ya sincronizado): Óscar cambia el campo a claude y la pasa a To Do entre dos ciclos,
+# SIN `agente` por medio. Solo la sincronización que `una-vez` hace antes de leer la cola evita que la coja local o
+# que se bloquee por desajuste entre el campo «### Agente» y la etiqueta.
+NE=$NE PYTHONPATH="$S.aglib" python3 - <<'PY' || mal "no pude pasar #$NE a To Do"
+import os, sqlite3
+from aglib import *
+n = int(os.environ["NE"])
+s = estado()
+for it in proyecto(s)["items"].values():  # #NE sola en la cola: nada más ocupa el turno de claude
+    if it["fields"].get("Estado") == "To Do" and not it["fields"].get("Bloqueo") and it.get("issue") != f"oscar/demo-app#{n}":
+        it["fields"]["Estado"] = "Backlog"
+assert tarjeta(s, n)["fields"]["Agente"] == "local" and issue(s, n)["labels"] == ["agent:local"], tarjeta(s, n)
+tarjeta(s, n)["fields"].update({"Agente": "claude", "Estado": "To Do", "Prioridad": "P0 urgente"})
+guardar(s)
+con = sqlite3.connect("proyectos/demo/estado/registro.db")
+con.execute("UPDATE tareas SET estado='bloqueada' WHERE estado='en_curso' AND issue<>?", (n,))
+con.commit()
+PY
+# Ejecución completa (sin --detener-tras): no basta con que la reserva diga claude, claude tiene que hacer la tarea.
+python3 equipo.py demo una-vez > "$S.ag5.log" 2>&1 || true
+NE=$NE PYTHONPATH="$S.aglib" python3 - "$S.ag5.log" <<'PY' && ok "campo cambiado y tarjeta movida a To Do entre ciclos: la hace claude (invocado y con su PR) sin Bloqueo por desajuste" || { cat "$S.ag5.log"; mal "To Do tras cambiar el agente en el tablero"; }
+import os, sqlite3, subprocess, sys
+from aglib import *
+n = int(os.environ["NE"])
+f = sqlite3.connect("proyectos/demo/estado/registro.db").execute(
+    "SELECT agente, estado, causa, rama FROM tareas WHERE issue=?", (n,)).fetchone()
+assert f and f[0] == "claude" and f[1] != "bloqueada" and not f[2] and f[3] == f"agente/claude/issue-{n}", f
+s = estado(); i = issue(s, n); campos = tarjeta(s, n)["fields"]
+assert not campos.get("Bloqueo") and campos["Estado"] == "Testing / Review" and campos["Agente"] == "claude", campos
+assert i["labels"] == ["agent:claude"] and "### Agente\n\nclaude\n" in i["body"], (i["labels"], i["body"])
+assert sum("Agente cambiado: `local` → `claude`" in c for c in i["comments"]) == 1, i["comments"]
+t = open(sys.argv[1], encoding="utf-8").read()
+assert "no coincide" not in t and "invocando agente 'local'" not in t, t
+assert t.count(f"#{n}: invocando agente 'claude'\n") == 1, t   # claude la ha hecho, una vez
+rama = f"agente/claude/issue-{n}"
+prs = [p for p in s["prs"] if p["repo"] == "oscar/demo-app" and p["head"].endswith(f"/issue-{n}")]
+assert len(prs) == 1 and prs[0]["head"].endswith(rama), prs
+hecho = subprocess.run(["git", "-C", os.environ["FAKE_GH_REMOTOS"] + "/demo-app.git", "show", f"{rama}:docs/agente-todo.md"],
+                       capture_output=True, text=True).stdout
+assert "Hecho por el equipo" in hecho, hecho
+# El cambio lo aplica la sincronización que hace `una-vez` antes de leer la cola: nadie lo sincronizó antes (el
+# campo y la columna cambiaron a la vez, sin `agente` por medio) y la cola ya leyó la etiqueta de claude.
+assert t.count(f"#{n}: agente cambiado en el tablero a 'claude'") == 1, t
+PY
+
+# Carrera con Doing, sin cerrojo de por medio (alguien mueve la tarjeta mientras se cambia su agente):
+#  a) leída en To Do y ya en Doing al escribir → no se toca nada;
+#  b) pasa a Doing justo después de escribir la etiqueta → se deshace todo (etiqueta, cuerpo, campo, sin comentario);
+#  c) el coordinador, al mover a Doing, ve que la etiqueta ya no es la del agente que leyó → vuelve a To Do sin lanzar.
+NCA=$(nueva_ag carrera local)
+python3 equipo.py demo agente > /dev/null 2>&1 || true
+NCA=$NCA PYTHONPATH="$S.aglib" EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "carrera con Doing: el cambio de agente se valida al escribir y se deshace; el coordinador no lanza con otro agente" || mal "carrera entre cambio de agente y paso a Doing"
+import json, os
+import equipo as E
+from aglib import *
+C, T = E.C, E.C.T
+cfg = {**E.cfg_proyecto("demo"), "gh_bin": E.gh_bin()}
+n = int(os.environ["NCA"])
+poner(n, Estado="To Do")
+tb = cfg["tablero"]
+t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), cfg["gh_bin"])
+rec = C.ESTADO / C.RECUERDO_AGENTES
+foto = lambda: json.dumps([issue(estado(), n), tarjeta(estado(), n)["fields"]], sort_keys=True)
+# a)
+leida = t.item_de_issue("oscar/demo-app", n)
+assert leida["estado"] == "To Do" and leida["agente_campo"] == "local", leida
+poner(n, Estado="Doing")
+antes = foto()
+try:
+    C.aplicar_agente(t, dict(leida), "claude", cfg["agentes"], cfg["gh_bin"], "el ensayo", rec)
+    raise AssertionError("a) cambió el agente de una tarjeta en Doing")
+except C.CambioAgenteNoPermitido as e:
+    assert "Doing" in str(e), e
+assert foto() == antes, "a) tocó la tarjeta"
+# b)
+poner(n, Estado="To Do")
+antes = foto()
+original = C._poner_agente
+def poner_y_mover(*a, **k):
+    original(*a, **k)
+    poner(n, Estado="Doing")   # el coordinador (u otra persona) la mueve justo ahora
+C._poner_agente = poner_y_mover
+try:
+    C.aplicar_agente(t, t.item_de_issue("oscar/demo-app", n), "claude", cfg["agentes"], cfg["gh_bin"], "el ensayo", rec)
+    raise AssertionError("b) dejó el cambio en una tarjeta que pasó a Doing")
+except C.CambioAgenteNoPermitido as e:
+    assert "deshecho" in str(e), e
+finally:
+    C._poner_agente = original
+i, campos = issue(estado(), n), tarjeta(estado(), n)["fields"]
+assert i["labels"] == ["agent:local"] and "### Agente\n\nlocal\n" in i["body"] and campos["Agente"] == "local", (i, campos)
+assert not i["comments"], i["comments"]
+pend = C._leer_json_dict(rec.with_name(C.COMENTARIOS_AGENTES))
+assert f"oscar/demo-app#{n}" not in json.dumps(pend), pend
+# c)
+poner(n, Estado="To Do")
+cola = C.ColaTablero(cfg, None)
+s = estado(); issue(s, n)["labels"] = ["agent:claude"]; guardar(s)   # cambiada tras leer la cola (que leyó local)
+assert not cola.a_doing(n, "local") and tarjeta(estado(), n)["fields"]["Estado"] == "To Do"
+s = estado(); issue(s, n)["labels"] = ["agent:local"]; guardar(s)
+mover = cola.t.mover
+def mover_y_cambiar(item_id, destino):
+    mover(item_id, destino)
+    if destino == "Doing":
+        s = estado(); issue(s, n)["labels"] = ["agent:claude"]; guardar(s)
+cola.t.mover = mover_y_cambiar
+assert not cola.a_doing(n, "local") and tarjeta(estado(), n)["fields"]["Estado"] == "To Do", tarjeta(estado(), n)
+s = estado(); issue(s, n)["labels"] = ["agent:local"]; tarjeta(s, n)["fields"]["Estado"] = "Backlog"; guardar(s)
+cola.t.mover = mover
+assert cola.a_doing(n, "local") is False   # en Backlog no se mueve a Doing
+PY
+
+# Más carreras y fallos a medias de `aplicar_agente`:
+#  d) la etiqueta cambia a mano entre la lectura de quien decide y la escritura → gana la etiqueta, no se toca nada;
+#  e) se escribe la etiqueta y falla el cuerpo → se deshace todo, sin comentario ni comentario pendiente;
+#  f) falla también deshacer (etiqueta nueva, cuerpo viejo) y la tarjeta pasa a Doing → la sincronización no publica
+#     el «Agente cambiado» (ni uno que quedara pendiente de antes) basándose solo en la etiqueta.
+NCA=$NCA PYTHONPATH="$S.aglib" EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "cambio de agente: etiqueta cambiada entre medias gana; fallo a medias se deshace y no anuncia nada" || mal "cambio de agente con la etiqueta cambiada o un fallo a medias"
+import json, os
+import equipo as E
+from aglib import *
+C, T = E.C, E.C.T
+cfg = {**E.cfg_proyecto("demo"), "gh_bin": E.gh_bin()}
+n = int(os.environ["NCA"])
+tb = cfg["tablero"]
+t = T.Tablero(tb["owner"], tb["numero"], tb.get("owner_tipo", "user"), cfg["gh_bin"])
+rec = C.ESTADO / C.RECUERDO_AGENTES
+clave = f"oscar/demo-app#{n}"
+def ver():
+    s = estado(); i = issue(s, n)
+    return i["labels"], "### Agente\n\nlocal\n" in i["body"], tarjeta(s, n)["fields"].get("Agente"), list(i["comments"])
+def pendiente():
+    return clave in C._leer_json_dict(rec.with_name(C.COMENTARIOS_AGENTES))
+poner(n, Estado="To Do")
+assert ver() == (["agent:local"], True, "local", []), ver()
+# d)
+leida = t.item_de_issue("oscar/demo-app", n)
+s = estado(); issue(s, n)["labels"] = ["agent:codex"]; guardar(s)   # Óscar cambia la etiqueta a mano justo ahora
+try:
+    C.aplicar_agente(t, dict(leida), "claude", cfg["agentes"], cfg["gh_bin"], "el ensayo", rec, campo_decidido="local")
+    raise AssertionError("d) aplicó el agente con una etiqueta cambiada entre medias")
+except C.CambioAgenteNoPermitido as e:
+    assert "gana la etiqueta" in str(e), e
+assert ver() == (["agent:codex"], True, "local", []) and not pendiente(), ver()
+s = estado(); issue(s, n)["labels"] = ["agent:local"]; guardar(s)
+# e)
+original = C._gh_issue
+fallos = {"cuerpo": 1, "etiqueta": 0}
+def gh_con_fallos(gh_bin, *args, **k):
+    if "edit" in args and "--body-file" in args and fallos["cuerpo"]:
+        fallos["cuerpo"] -= 1; raise RuntimeError("502 simulado al editar el cuerpo")
+    if "edit" in args and "--add-label" in args and fallos["etiqueta"] \
+            and args[args.index("--add-label") + 1] == "agent:local":   # solo al deshacer (volver a local)
+        fallos["etiqueta"] -= 1; raise RuntimeError("502 simulado al deshacer la etiqueta")
+    return original(gh_bin, *args, **k)
+C._gh_issue = gh_con_fallos
+try:
+    try:
+        C.aplicar_agente(t, t.item_de_issue("oscar/demo-app", n), "claude", cfg["agentes"], cfg["gh_bin"], "el ensayo", rec)
+        raise AssertionError("e) dio por bueno un cambio con el cuerpo sin actualizar")
+    except C.CambioAgenteNoPermitido as e:
+        assert "deshecho" in str(e) and "502" in str(e), e
+    assert ver() == (["agent:local"], True, "local", []) and not pendiente(), ver()
+    # f)
+    fallos.update(cuerpo=1, etiqueta=1)
+    try:
+        C.aplicar_agente(t, t.item_de_issue("oscar/demo-app", n), "claude", cfg["agentes"], cfg["gh_bin"], "el ensayo", rec)
+        raise AssertionError("f) dio por bueno un cambio con el cuerpo sin actualizar")
+    except C.CambioAgenteNoPermitido as e:
+        assert "no pude deshacer" in str(e), e
+finally:
+    C._gh_issue = original
+etq, cuerpo_local, _, comentarios = ver()
+assert etq == ["agent:claude"] and cuerpo_local and not comentarios and not pendiente(), ver()
+# Un «Agente cambiado» que quedara pendiente de antes tampoco se publica con el cuerpo sin cambiar.
+C._comentario_pendiente(rec, t.item_de_issue("oscar/demo-app", n), "claude", "**Agente cambiado: `local` → `claude`**",
+                        tipo="cambio")
+poner(n, Estado="Doing")
+res = C.sincronizar_agentes(t, [t.item_de_issue("oscar/demo-app", n)], cfg["agentes"], cfg["gh_bin"], rec)
+assert not res["errores"], res
+etq, cuerpo_local, _, comentarios = ver()
+assert etq == ["agent:claude"] and cuerpo_local, ver()   # en Doing el cuerpo no se toca
+assert not any("Agente cambiado" in c for c in comentarios) and not pendiente(), comentarios
+s = estado(); issue(s, n)["labels"] = ["agent:local"]; tarjeta(s, n)["fields"]["Estado"] = "Backlog"; guardar(s)
+PY
+
+# El comentario falla después de cambiar la etiqueta, el cuerpo y el campo: queda pendiente y se publica en el
+# ciclo siguiente (aunque la tarjeta ya parezca al día), una sola vez.
+NA=$NA PYTHONPATH="$S.aglib" python3 -c "import os; from aglib import *; poner(int(os.environ['NA']), Agente='local')"
+FAKE_GH_FALLA_COMENTARIO=$NA python3 equipo.py demo agente > "$S.ag6.log" 2>&1 || true
+python3 equipo.py demo agente > "$S.ag7.log" 2>&1 || true
+python3 equipo.py demo agente > "$S.ag8.log" 2>&1 || true
+NA=$NA PYTHONPATH="$S.aglib" python3 - "$S.ag6.log" "$S.ag7.log" <<'PY' && ok "si falla el comentario del cambio de agente, se publica en el ciclo siguiente (una vez)" || { cat "$S.ag6.log" "$S.ag7.log" "$S.ag8.log"; mal "comentario del cambio de agente perdido"; }
+import json, os, sys
+from aglib import *
+n = int(os.environ["NA"])
+assert "502" in open(sys.argv[1], encoding="utf-8").read()
+assert "publicado el comentario pendiente" in open(sys.argv[2], encoding="utf-8").read()
+s = estado(); i = issue(s, n)
+assert i["labels"] == ["agent:local"] and "### Agente\n\nlocal\n" in i["body"], (i["labels"], i["body"])
+assert tarjeta(s, n)["fields"]["Agente"] == "local", tarjeta(s, n)
+assert sum("`claude` → `local`" in c for c in i["comments"]) == 1, i["comments"]
+assert "Agente cambiado: `claude` → `local`" in i["comments"][-1], i["comments"]
+ruta = "proyectos/demo/estado/agentes-tablero-comentarios.json"
+assert not os.path.exists(ruta) or f"oscar/demo-app#{n}" not in json.load(open(ruta)), open(ruta).read()
+PY
+
+# Cerrojo de agentes entre procesos (bloqueo del sistema operativo): ocupado por un proceso vivo → espera y se rinde;
+# si ese proceso muere con el cerrojo cogido, el sistema lo suelta; un archivo viejo de un PID muerto no estorba; y
+# muchos procesos a la vez (también justo cuando muere quien lo tenía) nunca están dos dentro a la vez.
+EQUIPO_IA_PROYECTO=demo python3 - "$S.cerrojo" <<'PY' && ok "cerrojo de agentes: ocupado espera y se rinde; si muere quien lo tiene se suelta; nunca dos dentro" || mal "cerrojo de agentes"
+import json, os, signal, subprocess, sys, time
+from pathlib import Path
+import equipo as E
+C = E.C
+d = Path(sys.argv[1]); d.mkdir(exist_ok=True)
+lock = d / C.CERROJO_AGENTES
+# Un archivo de una versión anterior (PID muerto) no impide coger el cerrojo.
+lock.write_text(json.dumps({"pid": 999999}))
+with C.cerrojo_agentes(d, espera=2):
+    assert json.loads(lock.read_text())["pid"] == os.getpid()
+COGER = ("import sys, time, coordinador as C\nfrom pathlib import Path\n"
+         "with C.cerrojo_agentes(Path(sys.argv[1]), espera=5):\n    print('dentro', flush=True)\n    time.sleep(60)\n")
+vivo = subprocess.Popen([sys.executable, "-c", COGER, str(d)], stdout=subprocess.PIPE, text=True)
+try:
+    assert vivo.stdout.readline().strip() == "dentro"
+    t0 = time.monotonic()
+    try:
+        with C.cerrojo_agentes(d, espera=0.6):
+            raise AssertionError("entró con el cerrojo ocupado")
+    except TimeoutError as e:
+        assert str(vivo.pid) in str(e), e
+    assert time.monotonic() - t0 >= 0.5
+finally:
+    vivo.send_signal(signal.SIGKILL); vivo.wait()   # muere con el cerrojo cogido: no hay nada que retirar
+t0 = time.monotonic()
+with C.cerrojo_agentes(d, espera=2):
+    assert time.monotonic() - t0 < 1.5
+# Carrera: uno lo tiene y muere mientras ocho esperan; cada uno anota entrada y salida en un registro común.
+registro = d / "registro.txt"; registro.write_text("")
+CONTAR = ("import os, sys, time, coordinador as C\nfrom pathlib import Path\n"
+          "for _ in range(3):\n"
+          "    with C.cerrojo_agentes(Path(sys.argv[1]), espera=60):\n"
+          "        open(sys.argv[2], 'a').write(f'in {os.getpid()}\\n'); time.sleep(0.03)\n"
+          "        open(sys.argv[2], 'a').write(f'out {os.getpid()}\\n')\n")
+vivo = subprocess.Popen([sys.executable, "-c", COGER, str(d)], stdout=subprocess.PIPE, text=True)
+assert vivo.stdout.readline().strip() == "dentro"
+hijos = [subprocess.Popen([sys.executable, "-c", CONTAR, str(d), str(registro)]) for _ in range(8)]
+time.sleep(0.5)
+vivo.send_signal(signal.SIGKILL); vivo.wait()
+assert all(h.wait(timeout=120) == 0 for h in hijos)
+eventos = registro.read_text().splitlines()
+assert len(eventos) == 8 * 3 * 2, len(eventos)
+for i in range(0, len(eventos), 2):  # siempre «in X» seguido de «out X»: nunca dos dentro a la vez
+    a, b = eventos[i].split(), eventos[i + 1].split()
+    assert a[0] == "in" and b[0] == "out" and a[1] == b[1], eventos[i:i + 2]
+assert lock.exists()  # el archivo no se borra nunca
+PY
+
+# Sin ningún agente activo: el campo se queda con una sola opción que no es un agente, se vacía en todas las
+# tarjetas y elegir un agente (desde una opción antigua que aún se ve en el móvil) se revierte con comentario.
+cp proyectos/demo/config.json "$S.demo-ag.json"
+# Justo antes de desactivarlos, Óscar elige claude en #NDO (Doing, etiqueta local): desactivar local no es un cambio
+# de etiqueta, así que esa elección se revierte con su comentario (no se borra en silencio).
+NDO=$NDO PYTHONPATH="$S.aglib" python3 -c "import os; from aglib import *; poner(int(os.environ['NDO']), Agente='claude')"
+NDO=$NDO PYTHONPATH="$S.aglib" python3 -c "import os; from aglib import *; print(len(issue(estado(), int(os.environ['NDO']))['comments']))" > "$S.ndo-comentarios"
+EQUIPO_IA_PROYECTO=demo python3 - <<'PY' || mal "no pude desactivar los agentes"
+import json
+import equipo as E
+ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
+for n in E.C.agentes_activos(E.cfg_proyecto("demo")["agentes"]):  # los agentes suelen venir de equipo.json
+    c.setdefault("agentes", {}).setdefault(n, {})["activo"] = False
+json.dump(c, open(ruta, "w"), indent=2)
+assert not E.C.agentes_activos(E.cfg_proyecto("demo")["agentes"])
+PY
+python3 equipo.py demo agente > "$S.ag9.log" 2>&1 || true
+NDO=$NDO ANTES=$(cat "$S.ndo-comentarios") PYTHONPATH="$S.aglib" python3 - <<'PY' && ok "elección hecha en Doing justo antes de desactivar al último agente: revertida con comentario" || { cat "$S.ag9.log"; mal "elección en Doing borrada sin comentario al desactivar los agentes"; }
+import os
+from aglib import *
+n = int(os.environ["NDO"])
+s = estado(); i = issue(s, n)
+assert i["labels"] == ["agent:local"] and "### Agente\n\nlocal\n" in i["body"], (i["labels"], i["body"])
+assert not tarjeta(s, n)["fields"].get("Agente"), tarjeta(s, n)   # sin agentes activos, el campo queda vacío
+nuevos = i["comments"][int(os.environ["ANTES"]):]
+assert len(nuevos) == 1 and "El agente sigue siendo `local`" in nuevos[0] and "`claude`" in nuevos[0] \
+    and "la tarjeta está en Doing" in nuevos[0], nuevos
+PY
+NC=$NC PYTHONPATH="$S.aglib" python3 -c "import os; from aglib import *; poner(int(os.environ['NC']), Agente='claude')"
+python3 equipo.py demo agente > "$S.ag10.log" 2>&1 || true
+python3 equipo.py demo agente "$NC" claude > "$S.ag11.log" 2>&1 && R11=0 || R11=$?
+cp "$S.demo-ag.json" proyectos/demo/config.json
+NC=$NC R11=$R11 PYTHONPATH="$S.aglib" python3 - "$S.ag10.log" "$S.ag11.log" <<'PY' && ok "sin agentes activos: el campo no ofrece agentes y lo elegido se revierte con comentario" || { cat "$S.ag9.log" "$S.ag10.log" "$S.ag11.log"; mal "campo Agente con todos los agentes desactivados"; }
+import os, sys
+from aglib import *
+n = int(os.environ["NC"])
+s = estado(); p = proyecto(s)
+campo = next(f for f in p.get("campos_extra", []) if f["name"] == "Agente")
+assert [o["name"] for o in campo["options"]] == ["sin-agente-activo"], campo
+assert all(not it["fields"].get("Agente") for it in p["items"].values()), [it["fields"] for it in p["items"].values()]
+i = issue(s, n)
+assert i["labels"] == ["agent:local"] and "### Agente\n\nlocal\n" in i["body"], (i["labels"], i["body"])
+assert "El agente sigue siendo" in i["comments"][-1] and "`claude` no es un agente activo" in i["comments"][-1], i["comments"]
+assert "1 revertido(s)" in open(sys.argv[1], encoding="utf-8").read()
+assert os.environ["R11"] != "0" and "no es un agente activo" in open(sys.argv[2], encoding="utf-8").read()
+PY
+python3 equipo.py demo agente > "$S.ag12.log" 2>&1 || true
+NB=$NB NC=$NC PYTHONPATH="$S.aglib" python3 - <<'PY' && ok "al reactivar los agentes, el campo vuelve a ofrecerlos y se rellena según la etiqueta" || { cat "$S.ag12.log"; mal "campo Agente tras reactivar los agentes"; }
+import os
+from aglib import *
+s = estado(); p = proyecto(s)
+campo = next(f for f in p.get("campos_extra", []) if f["name"] == "Agente")
+assert "claude" in [o["name"] for o in campo["options"]] and "sin-agente-activo" not in [o["name"] for o in campo["options"]], campo
+assert tarjeta(s, int(os.environ["NC"]))["fields"]["Agente"] == "local", tarjeta(s, int(os.environ["NC"]))
+assert tarjeta(s, int(os.environ["NB"]))["fields"]["Agente"] == "local", tarjeta(s, int(os.environ["NB"]))
+PY
+
+PUERTO=8793
+python3 equipo.py panel --puerto $PUERTO --no-abrir > "$S.panel-ag.log" 2>&1 &
+PANEL=$!
+for _ in $(seq 1 60); do curl -sf "http://127.0.0.1:$PUERTO/" | grep -q "Equipo IA" && break; sleep 0.5; done
+TOKEN=$(curl -sf "http://127.0.0.1:$PUERTO/" | sed -n 's/.*const TOKEN = "\([^"]*\)".*/\1/p')
+NA=$NA NB=$NB NC=$NC NDO=$NDO PUERTO=$PUERTO TOKEN=$TOKEN PYTHONPATH="$S.aglib" python3 - <<'PY' && ok "panel: agente en cada tarjeta (también Done), desplegable solo en Backlog/Planning/To Do; Doing e inactivo rechazados" || mal "panel: agente de las tarjetas"
+import json, os, urllib.error, urllib.request
+from aglib import *
+base = f"http://127.0.0.1:{os.environ['PUERTO']}"
+na, nb, nc, nd = (int(os.environ[k]) for k in ("NA", "NB", "NC", "NDO"))
+poner(na, Estado="Done")   # una tarjeta terminada también muestra su agente (sin desplegable)
+def demo():
+    return {p["nombre"]: p for p in json.load(urllib.request.urlopen(base + "/api/estado?refrescar=1"))["proyectos"]}["demo"]
+def cambiar(cuerpo):
+    req = urllib.request.Request(base + "/api/proyecto/demo/agente", data=json.dumps(cuerpo).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Token": os.environ["TOKEN"]})
+    try:
+        r = urllib.request.urlopen(req); return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, json.load(e)
+d = demo()
+assert "codex" not in d["agentes_tablero"] and {"claude", "local"} <= set(d["agentes_tablero"]), d["agentes_tablero"]
+for col, ts in d["tarjetas"].items():
+    for t in ts:
+        assert "agente" in t and t["agente_editable"] == (col in ("Backlog", "Planning", "To Do")), (col, t)
+ts = {t["numero"]: t for g in d["tarjetas"].values() for t in g}
+assert ts[nb]["agente"] == "local" and ts[nd]["agente"] == "local" and not ts[nd]["agente_editable"], (ts[nb], ts[nd])
+assert na in {t["numero"] for t in d["tarjetas"].get("Done", [])} and ts[na]["agente"] == "local" \
+    and not ts[na]["agente_editable"], ts.get(na)
+codigo, r = cambiar({"numero": nb, "agente": "claude"})                     # Backlog: local → claude
+assert codigo == 200 and r["ok"], (codigo, r)
+s = estado(); i = issue(s, nb)
+assert i["labels"] == ["agent:claude"] and "### Agente\n\nclaude\n" in i["body"], (i["labels"], i["body"])
+assert tarjeta(s, nb)["fields"]["Agente"] == "claude" and any("desde el panel" in c.lower() for c in i["comments"]), i["comments"]
+assert demo()["tarjetas"]["Backlog"] and {t["numero"]: t for t in demo()["tarjetas"]["Backlog"]}[nb]["agente"] == "claude"
+antes = json.dumps(issue(estado(), nd))
+codigo, r = cambiar({"numero": nd, "agente": "claude"})                     # Doing: no
+assert codigo == 400 and not r["ok"] and "Doing" in r["error"], (codigo, r)
+codigo, r = cambiar({"numero": nc, "agente": "codex"})                      # inactivo: no
+assert codigo == 400 and not r["ok"] and "codex" in r["error"], (codigo, r)
+assert json.dumps(issue(estado(), nd)) == antes and issue(estado(), nc)["labels"] == ["agent:local"]
+codigo, r = cambiar({"numero": "x", "agente": "claude"})
+assert codigo == 400, (codigo, r)
+PY
+kill $PANEL 2>/dev/null || true
+python3 - <<'PY' && ok "HTML del desplegable de agente bien anidado (label/select/option/span)" || mal "HTML del desplegable de agente mal anidado"
+import re
+from html.parser import HTMLParser
+TAGS = ("div", "label", "select", "option", "span")
+class P(HTMLParser):
+    def __init__(s): super().__init__(); s.pila = []; s.vistos = set()
+    def handle_starttag(s, t, a):
+        s.vistos.add(t)
+        if t in TAGS: s.pila.append(t)
+    def handle_endtag(s, t):
+        if t in TAGS:
+            assert s.pila and s.pila.pop() == t, (t, s.getpos())
+h = open("panel.html", encoding="utf-8").read()
+cuerpo = re.search(r"function htmlAgente\(p, t\) \{(.*?)\n\}", h, re.S).group(1)
+trozos = [re.search(r"map\(a => `(.*?)`\)", cuerpo, re.S).group(1)] + re.findall(r"return `(.*?)`;", cuerpo, re.S)
+assert len(trozos) == 3, trozos
+p = P()
+for trozo in trozos:
+    p.feed(re.sub(r"\$\{[^}]*\}", "", trozo))
+assert not p.pila, p.pila
+assert {"label", "select", "option", "span"} <= p.vistos, p.vistos
+assert "${htmlAgente(p, t)}" in h
+# La lista pinta todas las columnas que devuelve la API (Done y PRO incluidas, y cualquier otra), con su agente.
+lista = re.search(r"const LISTA = \[(.*?)\];", h).group(1)
+assert [x.strip().strip('"') for x in lista.split(",")] == ["Testing / Review", "Doing", "To Do", "Planning", "Backlog",
+                                                             "Done", "PRO"], lista
+assert "LISTA.concat(Object.keys(p.tarjetas" in h and "columnas.flatMap(" in h
 PY
 
 echo "== 6. Compilación de todo el código"

@@ -2,7 +2,8 @@
 
 Lo usan el coordinador local y los workflows de GitHub Actions. Solo biblioteca estándar.
 El campo `Estado` es la fuente de verdad; `Prioridad` ordena; `Bloqueo` (texto) guarda la causa visible;
-`Siguiente` (texto) dice qué hacer con cada tarjeta (lo calcula `recomendar`).
+`Siguiente` (texto) dice qué hacer con cada tarjeta (lo calcula `recomendar`); `Agente` (single select con los
+agentes activos) refleja la etiqueta `agent:*` y permite cambiarla desde el tablero (lo decide `plan_agentes`).
 """
 from __future__ import annotations
 
@@ -19,6 +20,10 @@ ESTADOS = [BACKLOG, PLANNING, TODO, DOING, REVIEW, DONE, PRO]
 PRIORIDADES = ["P0 urgente", "P1 alta", "P2 normal", "P3 baja"]
 CAMPO_ESTADO, CAMPO_PRIORIDAD, CAMPO_BLOQUEO, CAMPO_SIGUIENTE = "Estado", "Prioridad", "Bloqueo", "Siguiente"
 CAMPOS_TEXTO = (CAMPO_BLOQUEO, CAMPO_SIGUIENTE)
+CAMPO_AGENTE = "Agente"
+SIN_AGENTE = "sin-agente-activo"   # única opción del campo Agente si no queda ningún agente activo (se revierte)
+AGENTE_EDITABLE = (BACKLOG, PLANNING, TODO)  # columnas en las que el agente de una tarjeta se puede cambiar
+NOMBRE_AGENTE_OK = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 
 
 def rango_prioridad(valor: str | None) -> int:
@@ -65,6 +70,31 @@ def aviso_agrupacion(info: dict) -> str | None:
     return f"La vista «{VISTA_TABLERO}» agrupa las columnas por {actual}, no por {CAMPO_ESTADO}: {ARREGLO_AGRUPACION}"
 
 
+ARREGLO_AGENTE_VISIBLE = (f"Vista {VISTA_TABLERO} → menú ▾ de la vista → Fields → marca {CAMPO_AGENTE} → Save "
+                          f"(se verá y se podrá cambiar en cada tarjeta, también en el móvil)")
+
+
+def campos_visibles(vista: dict) -> list[str] | None:
+    """Campos que muestra una vista (ProjectV2View.fields). None si la lectura no los trae."""
+    if not isinstance((vista or {}).get("fields"), dict):
+        return None
+    return [n["name"] for n in vista["fields"].get("nodes") or [] if n and n.get("name")]
+
+
+def aviso_agente_visible(info: dict) -> str | None:
+    """Aviso si el campo Agente existe pero la vista «Tablero» no lo muestra en sus tarjetas. GitHub añade los campos
+    nuevos ocultos en las vistas que ya existen y su API no permite elegir los campos visibles de una vista: el arreglo
+    es manual (`ARREGLO_AGENTE_VISIBLE`). None si está bien, si no hay campo o si no hay vista «Tablero»."""
+    if CAMPO_AGENTE not in {f.get("name") for f in (info.get("fields") or {}).get("nodes") or [] if f}:
+        return None
+    vista = next((v for v in (info.get("views") or {}).get("nodes") or []
+                  if v and v.get("name") == VISTA_TABLERO), None)
+    visibles = campos_visibles(vista) if vista else None
+    if visibles is None or CAMPO_AGENTE in visibles:
+        return None
+    return f"El campo {CAMPO_AGENTE} no se ve en las tarjetas de la vista «{VISTA_TABLERO}»: {ARREGLO_AGENTE_VISIBLE}"
+
+
 class Tablero:
     def __init__(self, owner: str, numero: int, owner_tipo: str = "user", gh_bin: list[str] | None = None,
                  env: dict | None = None):
@@ -109,6 +139,7 @@ class Tablero:
           fields(first:50){ nodes{ ... on ProjectV2FieldCommon{ id name dataType }
                                    ... on ProjectV2SingleSelectField{ id name dataType options{ id name } } } }
           views(first:20){ nodes{ name layout
+            fields(first:50){ nodes{ ... on ProjectV2FieldCommon{ name } } }
             verticalGroupByFields(first:5){ nodes{ ... on ProjectV2FieldCommon{ name } } } } } } } }"""
         return self.graphql(q, id=self.id)["node"]
 
@@ -157,6 +188,7 @@ class Tablero:
                     "estado": campos.get(CAMPO_ESTADO), "prioridad": campos.get(CAMPO_PRIORIDAD),
                     "bloqueo": (campos.get(CAMPO_BLOQUEO) or "").strip(),
                     "siguiente": (campos.get(CAMPO_SIGUIENTE) or "").strip(),
+                    "agente_campo": (campos.get(CAMPO_AGENTE) or "").strip(),
                 })
             if not d["pageInfo"]["hasNextPage"]:
                 return salida
@@ -187,6 +219,28 @@ class Tablero:
         q = """mutation($p:ID!,$i:ID!,$f:ID!,$t:String!){ updateProjectV2ItemFieldValue(input:{
                projectId:$p, itemId:$i, fieldId:$f, value:{ text:$t } }){ projectV2Item{ id } } }"""
         self.graphql(q, p=self.id, i=item_id, f=f["id"], t=texto[:1000])
+
+    def asegurar_opciones(self, campo: str, opciones: list[str]) -> str | None:
+        """Campo single select `campo` con exactamente `opciones` (en ese orden): lo crea si falta y, si sus opciones
+        no coinciden, las sustituye. Devuelve «creado», «opciones» o None (ya estaba al día)."""
+        malos = [o for o in opciones if not NOMBRE_AGENTE_OK.match(o)]
+        if malos or not opciones:
+            raise ErrorTablero(f"Opciones no válidas para {campo!r}: {malos or 'ninguna'}")
+        lista = ", ".join(f'{{name:{json.dumps(o)}, color:GRAY, description:""}}' for o in opciones)
+        f = self.campos.get(campo)
+        if not f:
+            q = (f"mutation($p:ID!,$n:String!){{ createProjectV2Field(input:{{ projectId:$p, dataType:SINGLE_SELECT, "
+                 f"name:$n, singleSelectOptions:[{lista}] }}){{ projectV2Field{{ ... on ProjectV2FieldCommon{{ id }} }} }} }}")
+            self.graphql(q, p=self.id, n=campo)
+            self._campos = None
+            return "creado"
+        if [o["name"] for o in f.get("options") or []] == list(opciones):
+            return None
+        q = (f"mutation($f:ID!){{ updateProjectV2Field(input:{{ fieldId:$f, singleSelectOptions:[{lista}] }}){{ "
+             f"projectV2Field{{ ... on ProjectV2FieldCommon{{ id }} }} }} }}")
+        self.graphql(q, f=f["id"])
+        self._campos = None
+        return "opciones"
 
     def anadir(self, issue_node_id: str) -> str:
         q = """mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{ projectId:$p, contentId:$c }){ item{ id } } }"""
@@ -474,6 +528,64 @@ def escribir_siguiente(t: Tablero, items: list[dict], rec: dict) -> int:
             it["siguiente"] = nuevo
             escritas += 1
     return escritas
+
+
+# --------------------------------------------------------------------------- agente asignado (campo Agente)
+
+def clave_tarjeta(it: dict) -> str:
+    """Clave de una tarjeta en el recuerdo de la sincronización del campo Agente: «owner/repo#N»."""
+    return f"{it['repo'].lower()}#{it['numero']}"
+
+
+def agente_por_etiquetas(etiquetas, etiqueta_de: dict[str, str]) -> str | None:
+    """Agente cuya etiqueta lleva la tarjeta (`etiqueta_de`: agente → etiqueta). None si no hay una sola."""
+    c = [n for n, e in etiqueta_de.items() if e in set(etiquetas or [])]
+    return c[0] if len(c) == 1 else None
+
+
+def plan_agentes(items: list[dict], etiqueta_de: dict[str, str], activos: list[str],
+                 recuerdo: dict[str, str]) -> list[dict]:
+    """Qué hacer con el campo Agente de cada tarjeta. La etiqueta `agent:*` es la fuente de verdad.
+
+    `recuerdo` guarda el valor del campo que dejó la última sincronización («» = vacío): si el campo ha cambiado desde
+    entonces y la etiqueta no, alguien ha elegido otro agente en el tablero. Ese cambio se aplica (etiqueta, campo
+    Agente del cuerpo y comentario) si la tarjeta está abierta en Backlog, Planning o To Do y el agente está activo; si
+    no, se revierte con un comentario. En cualquier otro caso gana la etiqueta (también si cambian las dos a la vez):
+    el campo se rellena con su agente, o se vacía si no tiene una sola etiqueta de agente activo.
+
+    Devuelve una acción por tarjeta: {"tipo": "al_dia"|"rellenar"|"aplicar"|"revertir", "it", "agente" (valor final
+    del campo, «» = vacío), "etiqueta" (agente de la etiqueta o None), "pedido" (lo elegido en el campo), "motivo"}.
+    """
+    acciones = []
+    for it in items:
+        etq = agente_por_etiquetas(it.get("etiquetas"), etiqueta_de)
+        objetivo = etq if etq in activos else ""
+        campo = (it.get("agente_campo") or "").strip()
+        previo = recuerdo.get(clave_tarjeta(it))
+        base = {"it": it, "etiqueta": etq, "pedido": campo, "motivo": ""}
+        if campo == objetivo:
+            acciones.append({**base, "tipo": "al_dia", "agente": campo})
+            continue
+        cambio_campo = previo is not None and campo != previo and campo != ""
+        # `previo` es el agente que decía la etiqueta en la última sincronización («» si no tenía uno activo). Si la
+        # etiqueta sigue diciendo ese agente y solo se ha desactivado, la etiqueta no ha cambiado: lo elegido en el
+        # campo entre medias se revierte con su comentario, no se borra en silencio.
+        cambio_etiqueta = previo is not None and objetivo != previo and etq != previo
+        if not cambio_campo or cambio_etiqueta:
+            acciones.append({**base, "tipo": "rellenar", "agente": objetivo})
+            continue
+        if not it.get("abierta", True):
+            motivo = "la issue está cerrada"
+        elif it.get("estado") not in AGENTE_EDITABLE:
+            motivo = (f"el agente solo se cambia en {', '.join(AGENTE_EDITABLE[:-1])} o {AGENTE_EDITABLE[-1]} "
+                      f"(la tarjeta está en {it.get('estado') or 'sin estado'})")
+        elif campo not in activos or campo not in etiqueta_de:
+            motivo = f"`{campo}` no es un agente activo de este proyecto"
+        else:
+            acciones.append({**base, "tipo": "aplicar", "agente": campo})
+            continue
+        acciones.append({**base, "tipo": "revertir", "agente": objetivo, "motivo": motivo})
+    return acciones
 
 
 def _gh(gh_bin: list[str], *args, env=None) -> subprocess.CompletedProcess:

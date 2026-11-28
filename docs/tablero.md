@@ -41,11 +41,62 @@ Un único sitio por transición:
 - **Prioridad**: P0…P3 (P2 normal por defecto en `tablero.py nueva`).
 - **Bloqueo**: texto con la causa y cómo seguir; vacío = sin bloqueo.
 - **Siguiente**: texto con el siguiente paso recomendado (ver [Guía de uso](guia-uso.md#qué-hago-ahora)).
+- **Agente**: single select con una opción por agente activo; refleja la etiqueta `agent:*` y sirve para
+  cambiarla (ver [Cambiar el agente de una tarea](#cambiar-el-agente-de-una-tarea)).
+
+## Cambiar el agente de una tarea
+
+La etiqueta `agent:*` de la issue manda; el campo **Agente** del tablero la refleja en cada tarjeta (también en
+el móvil) y se rellena solo. Para pasar una tarea, p. ej., de `local` a `claude` mientras está en **Backlog,
+Planning o To Do**, hay tres maneras:
+
+1. **Tablero** (web o móvil): cambia el campo Agente de la tarjeta. En el siguiente ciclo del equipo (o del
+   panel, si el equipo está parado) se cambian la etiqueta y el campo «Agente» del cuerpo, con un comentario.
+2. **Panel**: el desplegable de agente de la tarjeta ([Agente de cada tarjeta](panel.md#agente-de-cada-tarjeta)),
+   o en la terminal `python3 equipo.py <proyecto> agente N claude`.
+3. **Etiqueta**: cambia `agent:local` por `agent:claude` en la issue. Gana la etiqueta: el campo del tablero se
+   actualiza solo y, en Backlog, Planning o To Do, también el campo «Agente» del cuerpo.
+
+Así, al pasar a To Do la tarea la hace el agente nuevo sin Bloqueo por desajuste entre el campo y la etiqueta.
+Un cambio del campo en **Doing** o después, o a un agente **inactivo**, se deshace con un comentario que explica
+por qué. Si cambian a la vez el campo y la etiqueta, gana la etiqueta. Las opciones del campo son los agentes
+activos: `python3 equipo.py <proyecto> agente` (sin argumentos) o `preparar` crean el campo o ajustan sus opciones
+y sincronizan todas las tarjetas; el coordinador lo hace también al empezar cada ciclo, y solo escribe lo que
+cambia. Para saber quién cambió qué, guarda el valor sincronizado en `proyectos/<p>/estado/agentes-tablero.json`.
+
+**Paso manual (1 min) para verlo en las tarjetas**: GitHub añade el campo nuevo **oculto** en las vistas que ya
+existen y su API no permite elegir los campos visibles de una vista. En la vista «Tablero»: menú ▾ de la vista →
+Fields → marca **Agente** → Save. Desde entonces se ve y se cambia en cada tarjeta, también en la app del móvil.
+`crear`, el coordinador (al crear el campo), `tablero verificar` y el panel avisan mientras siga oculto.
+
+Detalles que evitan sorpresas:
+
+- **Sin carreras con el coordinador**: el coordinador, el panel y `agente` comparten un cerrojo
+  (`estado/agentes-tablero.lock`, un bloqueo del sistema operativo: si el proceso que lo tiene muere, se suelta
+  solo, sin cerrojos huérfanos que retirar a mano ni carreras al retirarlos). El coordinador lo mantiene desde la sincronización del ciclo hasta mover a Doing
+  las tareas que elige, y el panel lee y valida la tarjeta con el cerrojo puesto: un cambio iniciado en To Do no
+  puede tocar una tarea que el coordinador ya ha pasado a Doing (el panel espera un momento o avisa de que lo
+  intentes otra vez). Aunque alguien mueva la tarjeta sin el cerrojo, el estado se vuelve a leer justo antes de
+  escribir y otra vez después: si la tarjeta ya pasó a Doing, el cambio se deshace (etiqueta, cuerpo y campo). Si
+  al releerla su etiqueta ya no es la de cuando se decidió el cambio (alguien la cambió a mano entre medias), no se
+  toca nada: gana la etiqueta. Y el coordinador, ya en Doing, comprueba que la etiqueta sigue siendo la del agente
+  elegido; si no, la devuelve a To Do sin lanzar trabajo.
+- **Nada a medias**: si falla un paso (p. ej. se escribe la etiqueta y falla el cuerpo), se deshace todo y no se
+  publica ningún comentario.
+- **El comentario no se pierde**: se anota en `estado/agentes-tablero-comentarios.json` antes de escribir nada; si
+  GitHub falla al publicarlo, el ciclo siguiente lo publica (una vez) mientras la etiqueta y el campo «Agente» del
+  cuerpo sigan diciendo ese agente, aunque la tarjeta ya parezca al día y aunque falle el ajuste de las opciones del
+  campo. Con el cuerpo aún sin cambiar no se anuncia nada.
+- **Desactivar un agente no es cambiar la etiqueta**: si en una tarjeta en Doing se elige otro agente justo antes de
+  desactivar el suyo, esa elección se deshace con su comentario, no se borra en silencio.
+- **Sin agentes activos**: el campo se queda con una sola opción, `sin-agente-activo` (GitHub no admite un campo de
+  selección vacío), se vacía en todas las tarjetas y lo que se elija se deshace con un comentario. Las opciones se
+  ajustan siempre antes de revisar las tarjetas, también al desactivar el último agente.
 
 ## Plantilla del tablero
 
 Los tableros nuevos se **copian del tablero de ensayo** (vistas «Tablero» y «Planning», campos Estado,
-Prioridad, Bloqueo y Siguiente, y workflows desactivados). Para otra plantilla: `plantilla_tablero` en
+Prioridad, Bloqueo y Siguiente, y workflows desactivados); `crear` añade el campo Agente con los agentes activos. Para otra plantilla: `plantilla_tablero` en
 `equipo.json`. Un tablero creado sin plantilla y aún vacío se sustituye con
 `python3 equipo.py <proyecto> tablero rehacer` (el antiguo no se borra; elimínalo tú en Settings → Delete project).
 
@@ -80,7 +131,7 @@ python3 tablero.py nueva "Añadir media de puntos" --agente local \
   --prueba unit --prioridad P2 --todo
 ```
 
-Sin `--todo` queda en Backlog. Si faltan agente, archivos, criterios o prueba, se crea en Backlog con los
+`--agente` admite cualquier agente activo del proyecto. Sin `--todo` queda en Backlog. Si faltan agente, archivos, criterios o prueba, se crea en Backlog con los
 huecos marcados (y `--todo` se rechaza). `--dep N` añade una dependencia (sección y relación «Blocked by»: ver
 [Guía de uso](guia-uso.md#dependencias)). En la web: New issue → «Tarea para agente», añadirla al proyecto
 Equipo IA y moverla a To Do. Desde el panel: [Nueva tarea](panel.md#nueva-tarea).

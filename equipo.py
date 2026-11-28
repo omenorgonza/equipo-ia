@@ -3,7 +3,7 @@
 
   python3 equipo.py proyectos                       Lista los proyectos y si su coordinador está en marcha
   python3 equipo.py panel [--puerto 8765]           Panel web local (http://127.0.0.1:8765)
-  python3 equipo.py <proyecto> vigilar|una-vez|estado|parar|reanudar N|diagnostico|leccion …
+  python3 equipo.py <proyecto> vigilar|una-vez|estado|parar|reanudar N|agente N AGENTE|diagnostico|leccion …
   python3 equipo.py <proyecto> tablero ver|nueva|verificar …
   python3 equipo.py <proyecto> preparar             Repite la preparación de GitHub (etiquetas de todos sus agentes…)
   python3 equipo.py importar <nombre> --repo owner/repo [--repo owner/otro] [--descripcion "…"]
@@ -595,6 +595,17 @@ def preparar_proyecto(nombre: str, log=print) -> list[str]:
             log(f"⚠ {repo}: GitHub rechazó {len(fallidas)} etiqueta(s):\n    " + "\n    ".join(fallidas))
         else:
             log(f"{repo}: etiquetas al día ({', '.join(e for e in colores_etiquetas(cfg.get('agentes')) if e.startswith('agent:'))})")
+    try:  # campo Agente del tablero: sus opciones son los agentes activos (también los añadidos en el config.json)
+        t = T.Tablero(tablero["owner"], tablero["numero"], tablero.get("owner_tipo", "user"), gh_bin())
+        activos = C.agentes_activos(cfg.get("agentes"))
+        if not activos and T.CAMPO_AGENTE not in t.campos:
+            log(f"Campo {T.CAMPO_AGENTE} del tablero: no hay agentes activos; no lo creo")
+        else:  # sin agentes activos, una sola opción que no es un agente (el coordinador revierte si se elige)
+            hecho = t.asegurar_opciones(T.CAMPO_AGENTE, activos or [T.SIN_AGENTE])
+            log(f"Campo {T.CAMPO_AGENTE} del tablero: {'creado' if hecho == 'creado' else 'opciones cambiadas' if hecho else 'ya estaba'}"
+                f" ({', '.join(activos) or 'ningún agente activo'})")
+    except Exception as e:  # noqa: BLE001 — sin el campo, el agente se sigue cambiando con la etiqueta
+        pendientes.append(f"Campo {T.CAMPO_AGENTE} del tablero: {str(e)[:200]} (repite `preparar` cuando se pueda)")
     log("Pendiente para Óscar:\n  - " + "\n  - ".join(pendientes) if pendientes else "Nada pendiente.")
     if con_error:
         raise RuntimeError(f"preparar: faltan etiquetas en {', '.join(con_error)} (detalles arriba). Sin la etiqueta "
