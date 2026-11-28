@@ -441,12 +441,12 @@ assert "Historial de intentos" in issue["comments"][-1] and "Intento 3 (claude" 
 assert pendientes("local") == 2 and pendientes("claude") == 0, (pendientes("local"), pendientes("claude"))
 PY
 
-config_demo escalar_fallos false
+config_demo escalar_fallos '"false"'  # como texto, tal como lo escribiría alguien a mano en el config.json
 N=$(nueva_fallo fallo-sin-escalar local fuera1)
 python3 equipo.py demo una-vez > "$S.fallo-sin.log" 2>&1 || true
 export LOGU="$S.fallo-sin.log"
 config_demo restaurar
-comprobar_rev "$N" "escalar_fallos: false → Bloqueo al primer fallo, como antes" <<'PY' || cat "$S.fallo-sin.log"
+comprobar_rev "$N" "escalar_fallos: \"false\" (texto) en el config.json → Bloqueo al primer fallo, como antes" <<'PY' || cat "$S.fallo-sin.log"
 from revlib import *
 b = campos.get("Bloqueo") or ""
 assert campos["Estado"] == "To Do" and "Diff fuera de alcance: fuera-de-alcance.txt" in b and "intento(s)" not in b, campos
@@ -536,6 +536,51 @@ from revlib import *
 assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
 assert issue["labels"] == ["agent:claude"], issue["labels"]
 assert logs_agente("local") == 1 and logs_agente("claude") == 1, (logs_agente("local"), logs_agente("claude"))
+PY
+
+ci_demo() {  # ci_demo success|failure: resultado de la CI simulada de demo-app
+  CI="$1" python3 -c "
+import json,os; st=os.environ['FAKE_GH_STATE']; s=json.load(open(st)); s['ci']['oscar/demo-app']=os.environ['CI']; json.dump(s, open(st,'w'))"
+}
+N=$(nueva_fallo fallo-alterno local alterno)
+ci_demo failure
+python3 equipo.py demo una-vez > "$S.fallo-alterno.log" 2>&1 || true
+ci_demo success
+export LOGU="$S.fallo-alterno.log"
+comprobar_rev "$N" "junior falla una vez, termina y la CI sale en rojo: el contador de intentos vuelve a cero" <<'PY' || cat "$S.fallo-alterno.log"
+from revlib import *
+import sqlite3
+assert campos["Estado"] == "To Do" and "CI en rojo" in (campos.get("Bloqueo") or ""), campos
+assert logs_agente("local") == 2 and logs_agente("claude") == 0, (logs_agente("local"), logs_agente("claude"))
+t = json.loads(sqlite3.connect("proyectos/demo/estado/registro.db").execute(
+    "SELECT tiempos FROM tareas WHERE issue=?", (n,)).fetchone()[0] or "{}")
+assert not t.get("fallos_cuenta") and not t.get("fallos_agente"), t
+PY
+python3 equipo.py demo reanudar "$N" --desde agente > /dev/null
+python3 equipo.py demo una-vez > "$S.fallo-alterno2.log" 2>&1 || true
+export LOGU="$S.fallo-alterno2.log"
+comprobar_rev "$N" "tras la CI en rojo y reanudar --desde agente, el junior tiene sus intentos completos" <<'PY' || cat "$S.fallo-alterno2.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert issue["labels"] == ["agent:local"], issue["labels"]  # falla una vez y repite él: sin escalar a claude
+assert logs_agente("local") == 2 and logs_agente("claude") == 0, (logs_agente("local"), logs_agente("claude"))
+PY
+
+N=$(nueva_fallo etiqueta-mala local ok)
+NR="$N" python3 - <<'PY'
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+s["issues"][f"oscar/demo-app#{os.environ['NR']}"]["labels"] = ["agent:local", "agent:claude"]
+json.dump(s, open(st, "w"))
+PY
+config_demo agentes '{"apagado": {"activo": false, "etiqueta": "agent:apagado", "proveedor": "ollama", "modelo": "ollama/x"}}'
+python3 equipo.py demo una-vez > "$S.etiqueta-mala.log" 2>&1 || true
+config_demo restaurar
+comprobar_rev "$N" "Bloqueo por etiqueta no válida: solo lista los agentes activos" <<'PY' || cat "$S.etiqueta-mala.log"
+from revlib import *
+b = campos.get("Bloqueo") or ""
+assert "exactamente una etiqueta de agente" in b and "agent:local" in b and "agent:claude" in b, b
+assert "agent:apagado" not in b, b
 PY
 
 echo "== 4 novies. Motores del equipo: Codex (autor y revisor), segundo agente local, cadena de escalado y turnos de GPU"
@@ -664,13 +709,63 @@ PY
 
 N=$(nueva_motor motor-revcuota claude "[CODEX:cuota]")
 python3 equipo.py demo una-vez > "$S.motor-revcuota.log" 2>&1 || true
-comprobar_rev "$N" "codex sin cuota como revisor: revisa la reserva (claude) y queda una nota en la PR" <<'PY' || cat "$S.motor-revcuota.log"
+comprobar_rev "$N" "codex sin cuota y su reserva (claude) es el autor: revisa otro agente activo y queda una nota en la PR" <<'PY' || cat "$S.motor-revcuota.log"
 from revlib import *
 assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
-notas = [c for c in com if "nota: el revisor `codex` no tiene cuota: revisa `claude` (reserva)" in c]
+notas = [c for c in com if "nota: el revisor `codex` no tiene cuota: su reserva `claude` es el autor del cambio, así que "
+         "revisa `local`" in c]
+rondas = [c for c in com if "· revisor:" in c]
+assert notas and len(rondas) == 2 and all("revisor: local" in c for c in rondas), com
+assert "no tiene cuota" in pr["body"], pr["body"]
+PY
+
+N=$(nueva_motor motor-revcuota2 claude "[CODEX:cuota] [REV:cuotaoc]")
+python3 equipo.py demo una-vez > "$S.motor-revcuota2.log" 2>&1 || true
+comprobar_rev "$N" "codex y su sustituto (local) sin cuota: manda la reserva de codex y revisa otro agente activo (local-plus)" <<'PY' || cat "$S.motor-revcuota2.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert any("nota: el revisor `local` no tiene cuota: la reserva de `codex` `claude` es el autor del cambio, así que "
+           "revisa `local-plus`" in c for c in com), com
+rondas = [c for c in com if "· revisor:" in c]
+assert len(rondas) == 2 and "revisor: local-plus" in rondas[0] and "revisor: local " in rondas[1] + " ", rondas
+PY
+
+python3 - <<'PY'
+import json
+ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
+c["agentes"]["local-plus"]["activo"] = False       # solo queda local, y se queda sin cuota en la ronda 1
+json.dump(c, open(ruta, "w"), indent=2)
+PY
+N=$(nueva_motor motor-revcuota3 claude "[CODEX:cuota] [REV:cuotaoc]")
+python3 equipo.py demo una-vez > "$S.motor-revcuota3.log" 2>&1 || true
+cp "$S.demo-motores.json" proyectos/demo/config.json
+comprobar_rev "$N" "codex y su sustituto sin cuota y nadie más activo: claude revisa su propio cambio y la nota de la PR lo dice" <<'PY' || cat "$S.motor-revcuota3.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+assert any("el revisor `local` no tiene cuota" in c and "no hay otro agente activo que pueda revisar" in c
+           and "revisa su propio cambio" in c for c in com), com
+rondas = [c for c in com if "· revisor:" in c]
+assert len(rondas) == 2 and "revisor: claude" in rondas[0], rondas
+assert "revisa su propio cambio" in pr["body"], pr["body"]
+PY
+
+python3 - <<'PY'
+import json
+ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
+c["agentes"]["local"] = {"activo": False}          # sin otro agente activo que pueda revisar
+c["agentes"]["local-plus"]["activo"] = False
+json.dump(c, open(ruta, "w"), indent=2)
+PY
+N=$(nueva_motor motor-revsolo claude "[CODEX:cuota]")
+python3 equipo.py demo una-vez > "$S.motor-revsolo.log" 2>&1 || true
+cp "$S.demo-motores.json" proyectos/demo/config.json
+comprobar_rev "$N" "codex sin cuota, reserva = autor y nadie más activo: la nota de la PR dice que claude revisa su propio cambio" <<'PY' || cat "$S.motor-revsolo.log"
+from revlib import *
+assert campos["Estado"] == "Testing / Review" and not campos.get("Bloqueo"), campos
+notas = [c for c in com if "no hay otro agente activo que pueda revisar" in c and "revisa su propio cambio" in c]
 rondas = [c for c in com if "· revisor:" in c]
 assert notas and len(rondas) == 2 and all("revisor: claude" in c for c in rondas), com
-assert "no tiene cuota" in pr["body"], pr["body"]
+assert "revisa su propio cambio" in pr["body"], pr["body"]
 PY
 
 N=$(nueva_motor motor-cuota codex "[CODEX:cuota]")
@@ -718,6 +813,79 @@ assert len({x["modelo"] for x in t}) == 2, t
 assert all(a["fin"] <= b["ini"] for a, b in zip(t, t[1:])), t
 PY
 unset FAKE_CODEX_LOG FAKE_AGENTE_TURNOS FAKE_AGENTE_TURNO_S
+
+rm -f prueba-local-plus.txt proyectos/demo/prueba-local-plus.txt
+FAKE_OPENCODE_RAIZ_GIT=1 python3 equipo.py demo probar local-plus > "$S.probar-raiz.log" 2>&1 || true
+python3 - "$S.probar-raiz.log" <<'PY' && ok "probar local-plus con un OpenCode que escribe en la raíz git: el archivo cae en la carpeta de la prueba" || { cat "$S.probar-raiz.log"; mal "probar: archivo fuera de la carpeta de la prueba"; }
+import glob, os, sys
+t = open(sys.argv[1], encoding="utf-8").read()
+assert "RESULTADO: ACEPTADO" in t and "fuera de la carpeta" not in t, t
+assert not os.path.exists("prueba-local-plus.txt") and not os.path.exists("proyectos/demo/prueba-local-plus.txt")
+assert glob.glob("proyectos/demo/estado/pruebas/local-plus-*/prueba-local-plus.txt"), "no está en la carpeta de la prueba"
+PY
+rm -rf proyectos/demo/estado/pruebas/local-plus-*
+config_demo git_bin '["false"]'   # git que siempre falla: no se puede crear el repo aislado
+FAKE_OPENCODE_RAIZ_GIT=1 python3 equipo.py demo probar local-plus > "$S.probar-sin-git.log" 2>&1 && R=0 || R=$?
+config_demo restaurar
+R=$R python3 - "$S.probar-sin-git.log" <<'PY' && ok "probar sin poder crear el repo aislado: se detiene sin lanzar el agente ni escribir en la raíz" || { cat "$S.probar-sin-git.log"; mal "probar sin repo aislado"; }
+import glob, os, sys
+t = open(sys.argv[1], encoding="utf-8").read()
+assert os.environ["R"] != "0" and "no pude crear el repo git aislado" in t and "el agente no se ha ejecutado" in t, t
+assert "RESULTADO" not in t, t
+assert not os.path.exists("prueba-local-plus.txt") and not os.path.exists("proyectos/demo/prueba-local-plus.txt")
+assert not glob.glob("proyectos/demo/estado/pruebas/local-plus-*/salida-agente.log"), "se lanzó el agente"
+PY
+
+cp opencode.json "$S.opencode-diag.json"
+python3 - <<'PY'
+import json
+oc = json.load(open("opencode.json"))
+oc.setdefault("provider", {}).setdefault("ollama", {})["models"] = {"qwen2.5-coder:14b": {"name": "qwen2.5-coder:14b"}}
+json.dump(oc, open("opencode.json", "w"), indent=2)
+PY
+FAKE_OPENCODE_SERVICIO=lista python3 equipo.py demo diagnostico > "$S.diag-lista.log" 2>&1 || true
+FAKE_OPENCODE_SERVICIO=caido python3 equipo.py demo diagnostico > "$S.diag-caido.log" 2>&1 || true
+cp "$S.opencode-diag.json" opencode.json
+python3 - "$S.diag-lista.log" "$S.diag-caido.log" <<'PY' && ok "diagnostico lista el catálogo de OpenCode aunque su servicio no arranque" || { cat "$S.diag-lista.log" "$S.diag-caido.log"; mal "diagnostico sin el servicio de OpenCode"; }
+import sys
+lista, caido = (open(p, encoding="utf-8").read() for p in sys.argv[1:3])
+assert "catálogo de OpenCode (opencode models, aunque terminó con error" in lista and "ollama/qwen2.5-coder:14b" in lista, lista
+assert "ollama/gpt-oss:20b-32k no está en el catálogo" in lista, lista
+assert "catálogo de OpenCode (opencode.json (`opencode models` no arrancó" in caido, caido
+assert "ollama/qwen2.5-coder:14b" in caido and "ollama/gpt-oss:20b-32k no está en el catálogo" in caido, caido
+assert "no pude consultar el catálogo" not in caido, caido
+PY
+
+python3 - <<'PY'
+import json
+ruta = "proyectos/demo/config.json"; c = json.load(open(ruta))
+c["agentes"]["solo-demo"] = {"activo": False, "etiqueta": "agent:solo-demo", "proveedor": "ollama", "modelo": "ollama/x"}
+json.dump(c, open(ruta, "w"), indent=2)
+PY
+python3 equipo.py demo preparar > "$S.preparar.log" 2>&1 || true
+python3 - <<'PY' && ok "preparar crea la etiqueta de los agentes definidos solo en el config.json del proyecto" || { cat "$S.preparar.log"; mal "preparar: etiquetas de los agentes del proyecto"; }
+import json, os
+s = json.load(open(os.environ["FAKE_GH_STATE"]))
+etq = s.get("labels", {}).get("oscar/demo-app", [])
+assert {"agent:solo-demo", "agent:codex", "agent:local-plus", "agent:local", "agent:claude"} <= set(etq), etq
+PY
+grep -q "etiquetas al día" "$S.preparar.log" && ok "preparar sin errores: «etiquetas al día»" || { cat "$S.preparar.log"; mal "preparar: falta «etiquetas al día»"; }
+python3 - <<'PY'
+import json, os
+st = os.environ["FAKE_GH_STATE"]; s = json.load(open(st))
+s["labels"]["oscar/demo-app"] = [e for e in s["labels"]["oscar/demo-app"] if e != "agent:solo-demo"]
+json.dump(s, open(st, "w"))
+PY
+FAKE_GH_FALLA_ETIQUETA=agent:solo-demo python3 equipo.py demo preparar > "$S.preparar-falla.log" 2>&1 && R=0 || R=$?
+R=$R python3 - "$S.preparar-falla.log" <<'PY' && ok "preparar con una etiqueta rechazada por GitHub: lo dice, la deja pendiente y sale con error" || { cat "$S.preparar-falla.log"; mal "preparar: etiqueta rechazada"; }
+import json, os, sys
+t = open(sys.argv[1], encoding="utf-8").read()
+assert os.environ["R"] != "0", "preparar salió bien con una etiqueta rechazada"
+assert "etiquetas al día" not in t and "rechazó 1 etiqueta(s)" in t and "agent:solo-demo: HTTP 403" in t, t
+assert "Crear a mano en oscar/demo-app" in t and "faltan etiquetas en oscar/demo-app" in t, t
+s = json.load(open(os.environ["FAKE_GH_STATE"]))
+assert "agent:solo-demo" not in s["labels"]["oscar/demo-app"], s["labels"]
+PY
 cp "$S.demo-sin-motores.json" proyectos/demo/config.json
 
 echo "== 4 bis. Vista «Tablero»: columnas por Estado (sin aviso) o por otro campo (aviso con el arreglo)"
@@ -968,6 +1136,94 @@ e = estado()["demo"]["escalado"]
 assert e["activo"] is False and e["fallos"] == 3, e
 C.recargar_escalado(cfg)  # lo que hace `vigilar` al empezar cada ciclo
 assert cfg["escalar_fallos"] is False and cfg["fallos_para_escalar"] == 3, cfg
+PY
+PUERTO=$PUERTO TOKEN=$TOKEN python3 - <<'PY' && ok "panel: color y escalado guardados seguidos (y a la vez) sin perder ninguno y sin dejar .tmp" || mal "panel: guardados seguidos de color y escalado"
+import glob, json, os, threading, urllib.request
+import equipo as E
+base = f"http://127.0.0.1:{os.environ['PUERTO']}"
+def post(accion, cuerpo):
+    req = urllib.request.Request(f"{base}/api/proyecto/demo/{accion}", data=json.dumps(cuerpo).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Token": os.environ["TOKEN"]})
+    return json.load(urllib.request.urlopen(req))
+otro = next(c for c in E.PALETA if c != E.color_proyecto("demo"))
+assert post("color", {"color": otro})["ok"] and post("escalado", {"activo": True, "fallos": 4})["ok"]
+c = json.load(open("proyectos/demo/config.json"))
+assert c["color"] == otro and c["escalar_fallos"] is True and c["fallos_para_escalar"] == 4, c
+for ronda in range(5):  # a la vez: el panel atiende cada petición en su hilo
+    # Cada ronda cambia los tres valores respecto a lo que ya hay en config.json:
+    # así una petición fallida no puede pasar por buena dejando el valor anterior.
+    color = next(x for x in E.PALETA[ronda:] + E.PALETA[:ronda] if x != c["color"])
+    fallos = next(n for n in (ronda % 5 + 1, (ronda + 1) % 5 + 1) if n != c["fallos_para_escalar"])
+    activo = not c["escalar_fallos"]
+    resultados, errores = {}, {}
+    def lanzar(accion, cuerpo):
+        try:
+            resultados[accion] = post(accion, cuerpo)
+        except Exception as e:  # una excepción en el hilo no debe perderse
+            errores[accion] = repr(e)
+    hilos = [threading.Thread(target=lanzar, args=("color", {"color": color})),
+             threading.Thread(target=lanzar, args=("escalado", {"activo": activo, "fallos": fallos}))]
+    [h.start() for h in hilos]; [h.join() for h in hilos]
+    assert not errores, (ronda, errores)
+    assert set(resultados) == {"color", "escalado"}, (ronda, resultados)
+    assert all(r.get("ok") is True for r in resultados.values()), (ronda, resultados)
+    c = json.load(open("proyectos/demo/config.json"))
+    assert c["color"] == color and c["fallos_para_escalar"] == fallos and c["escalar_fallos"] is activo, (ronda, c)
+assert not glob.glob("proyectos/demo/*.tmp") and not glob.glob("proyectos/demo/.*.tmp"), os.listdir("proyectos/demo")
+PY
+cp "$S.demo-config-panel.bak" proyectos/demo/config.json
+python3 - <<'PY' && ok "escalar_fallos escrito como texto: \"false\" lo apaga; un valor raro lo deja activado con aviso" || mal "escalar_fallos como texto"
+import contextlib, io, json
+import coordinador as C
+import panel as P
+for valor, esperado in (("false", False), ("False", False), ("no", False), (0, False), ("true", True)):
+    assert C.normalizar_bool(valor, True, "escalar_fallos") is esperado, (valor, esperado)
+    assert P.escalado_proyecto({"escalar_fallos": valor})["activo"] is esperado, valor
+salida = io.StringIO()
+with contextlib.redirect_stdout(salida):
+    assert C.normalizar_bool(C.AUSENTE, True, "escalar_fallos") is True  # sin la clave: activado y sin aviso
+    assert P.escalado_proyecto({})["activo"] is True
+assert "valor no válido" not in salida.getvalue(), salida.getvalue()
+salida = io.StringIO()
+with contextlib.redirect_stdout(salida):
+    assert C.normalizar_bool("quizás", True, "escalar_fallos") is True
+    assert C.normalizar_bool("quizás", True, "escalar_fallos") is True  # el aviso sale una vez, no en cada ciclo
+assert salida.getvalue().count("escalar_fallos: valor no válido") == 1, salida.getvalue()
+salida = io.StringIO()
+with contextlib.redirect_stdout(salida):  # `null` explícito no es lo mismo que no poner la clave: avisa
+    assert C.normalizar_bool(None, True, "escalar_fallos") is True
+    assert P.escalado_proyecto({"escalar_fallos": None})["activo"] is True
+assert salida.getvalue().count("escalar_fallos: valor no válido null") == 1, salida.getvalue()
+PY
+EQUIPO_IA_PROYECTO=demo python3 - <<'PY' && ok "escalar_fallos como texto en el config.json: cargar_config y la recarga de vigilar lo aplican (\"false\" apaga; valor raro → activado con aviso)" || mal "escalar_fallos como texto en el config.json"
+import contextlib, io, json
+import coordinador as C
+ruta = "proyectos/demo/config.json"
+def escribir(valor):
+    c = json.load(open(ruta)); c["escalar_fallos"] = valor; json.dump(c, open(ruta, "w"), indent=2)
+escribir(True)
+cfg = C.cargar_config()  # un `vigilar` ya arrancado con el escalado activo
+assert cfg["escalar_fallos"] is True, cfg["escalar_fallos"]
+escribir("false")  # escrito a mano como texto
+assert C.cargar_config()["escalar_fallos"] is False
+salida = io.StringIO()
+with contextlib.redirect_stdout(salida):
+    C.recargar_escalado(cfg)  # lo que hace `vigilar` al empezar cada ciclo
+assert cfg["escalar_fallos"] is False, cfg["escalar_fallos"]
+assert "Escalado: escalar_fallos = false" in salida.getvalue(), salida.getvalue()
+escribir("tal vez")  # valor raro: sigue activado, con aviso en el log
+salida = io.StringIO()
+with contextlib.redirect_stdout(salida):
+    C.recargar_escalado(cfg)
+    C.recargar_escalado(cfg)
+assert cfg["escalar_fallos"] is True, cfg["escalar_fallos"]
+assert salida.getvalue().count("escalar_fallos: valor no válido \"tal vez\"") == 1, salida.getvalue()
+escribir(None)  # `null` explícito en el config.json: activado, pero con aviso (no se trata como clave ausente)
+C._avisos_bool.clear()
+salida = io.StringIO()
+with contextlib.redirect_stdout(salida):
+    assert C.cargar_config()["escalar_fallos"] is True
+assert "escalar_fallos: valor no válido null" in salida.getvalue(), salida.getvalue()
 PY
 cp "$S.demo-config-panel.bak" proyectos/demo/config.json
 grep -q "htmlEscalado(p)" panel.html && grep -q "/escalado" panel.html && grep -q 'id="esc-a-' panel.html \

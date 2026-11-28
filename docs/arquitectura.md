@@ -20,6 +20,7 @@ equipo-ia-lab/
 
 - **`equipo.py`**: un solo equipo instalado y varios proyectos configurados. `proyectos`, `panel`,
   `<proyecto> vigilar|una-vez|estado|parar|reanudar N|diagnostico|leccion …`, `<proyecto> tablero …`,
+  `<proyecto> preparar` (etiquetas de todos sus agentes y el resto de la preparación de GitHub),
   `importar`, `nuevo` y `migrar`. Para cada proyecto lanza el coordinador con su configuración.
 - **`coordinador.py`**: diagnóstico, una-vez, vigilar, parar, estado, reanudar, probar, configurar-local.
   Recoge las tareas de To Do, invoca al agente, verifica, publica la PR y espera la CI y la revisión.

@@ -90,9 +90,20 @@ las aplica en el ciclo siguiente, sin reiniciar.
 "fallos_para_escalar": 2     // intentos del junior antes de pasar al senior (1–5; con 1 escala al primer fallo)
 ```
 
+`escalar_fallos` también entiende `"false"`, `"no"` o `0` escritos a mano (y `"true"`, `"sí"`, `1`). Con un valor
+que no entiende —también un `null` explícito—, lo deja **activado** y lo avisa una vez en el log; si la clave no
+está, queda activado sin aviso. Lo mismo vale para `activo` y `standalone` de
+cada agente y para `revision.antes_de_pr` (este, si no se entiende, queda apagado).
+
 Los intentos gastados se guardan en el registro: tras un Bloqueo y `reanudar`, el junior solo tiene los que le
-quedaban (si ya los gastó, la tarea pasa directamente al senior). Si después de escalar devuelves la etiqueta al
-junior, manda la etiqueta: el coordinador pone el campo Agente al día y el junior empieza con todos sus intentos.
+quedaban (si ya los gastó, la tarea pasa directamente al senior). Cuando el agente **termina** la tarea (su trabajo
+llega al commit), el contador vuelve a cero: si después la CI sale en rojo y ejecutas `reanudar N --desde agente`,
+empieza con todos sus intentos (si la tarea ya había escalado, sigue con quien la terminó). Si después de escalar
+devuelves la etiqueta al junior, manda la etiqueta: el coordinador pone el campo Agente al día y el junior empieza
+con todos sus intentos.
+
+Si una issue no tiene exactamente una etiqueta de agente, el Bloqueo dice cuáles valen: solo las de los agentes
+activos.
 
 ## Motores del equipo
 
@@ -136,6 +147,13 @@ Para que el trabajo de Claude lo mire otro modelo (y repartir la cuota), en `rev
 - `revisores`: quién revisa a cada autor (si el revisor está apagado, revisa otro agente activo, el senior primero).
 - `reservas`: si un revisor se queda **sin cuota**, revisa su reserva en esa ronda y la PR lleva una nota
   («el revisor `codex` no tiene cuota: revisa `claude` (reserva)»); la ronda sigue contando.
+  Si la reserva es **el propio autor** (p. ej. Claude escribió el cambio y `codex` → `claude`), revisa otro agente
+  activo (el senior primero) y la nota lo explica («su reserva `claude` es el autor del cambio, así que revisa
+  `local`»). Si no hay ninguno, el autor revisa su propio cambio en una sesión nueva y la nota lo dice claramente
+  («⚠ `claude` revisa su propio cambio»), para que lo mires con más cuidado.
+  Si el **sustituto también se queda sin cuota**, vale su propia reserva o, si no tiene, la del revisor original, y
+  se siguen las mismas reglas sin repetir a nadie en esa ronda (p. ej. `codex` y `local` sin cuota: revisa
+  `local-plus`; si no queda nadie, el autor con la nota de autorrevisión). Solo se bloquea si no queda ninguno.
 - Codex **sin cuota como autor**: Bloqueo «Cuota agotada» sin culpa del agente (ni reintento ni escalado), como
   con Claude. `reanudar N` cuando se renueve.
 
@@ -152,8 +170,21 @@ Para tareas medianas sin coste, un modelo de Ollama más grande (por ejemplo `gp
 
 Cada agente local se lanza con `opencode run --standalone --model <su modelo>`: su propia ejecución, sin compartir
 sesión con el otro. Si tu OpenCode no conoce `--standalone`, pon `"standalone": false` en el agente.
-`diagnostico` avisa si el modelo de un agente local no está instalado en Ollama o no aparece en el catálogo de
-OpenCode (`opencode models`), que es lo que haría fallar al agente al arrancar.
+`diagnostico` lista el catálogo de OpenCode (`opencode models`) y avisa si el modelo de un agente local no está
+instalado en Ollama o no aparece en ese catálogo, que es lo que haría fallar al agente al arrancar. Si el servicio de
+OpenCode no arranca, usa lo que `opencode models` llegara a listar o, si no listó nada, el catálogo propio de
+`opencode.json` (`provider.ollama.models`), y dice de dónde lo ha sacado.
+
+`probar <agente>` trabaja en una carpeta nueva de `estado/pruebas/` que es su propio repo git: OpenCode escribe en
+la raíz git del directorio actual, así que sin ese repo el archivo de la prueba caería en la raíz del laboratorio.
+Si no puede crear ese repo (`git init` falla, p. ej. por un `git_bin` mal puesto), `probar` se detiene con `FALLO`
+antes de lanzar el agente.
+
+Si añades un agente solo en el `config.json` de un proyecto, `python3 equipo.py <proyecto> preparar` crea su
+etiqueta (`agent:<nombre>`) en los repos del proyecto; repite también el resto de la preparación de GitHub
+(variables y comprobación del secreto `TABLERO_TOKEN`) sin tocar el código. Solo dice «etiquetas al día» si GitHub
+las aceptó todas: si rechaza alguna (token sin permiso de escritura, red…), lista cada etiqueta con su motivo, la deja
+en «Pendiente para Óscar» y termina con error.
 
 ### Cadena de escalado
 

@@ -63,6 +63,12 @@ atención» usa el mismo color. Se cambia con las 8 muestras de la tarjeta (azul
 turquesa, rosa, ámbar, rojo; legibles en modo claro y oscuro) y se guarda en `proyectos/<p>/config.json`
 (clave `color`). `nuevo`/`importar`/`migrar` asignan el primero libre de la paleta.
 
+El color y el escalado se guardan igual: bajo un mismo cerrojo (leer, cambiar solo sus claves y escribir) y con
+escritura atómica en un temporal propio que se renombra sobre `config.json`. Aunque los guardes seguidos, o a la
+vez desde dos pestañas, no se pisa ninguno de los dos cambios, `vigilar` nunca lee un archivo a medias y no queda
+ningún `.tmp`. Una recarga del panel que empezó antes de guardar y llega después se descarta, para no pintar los
+valores viejos.
+
 ## Nueva tarea
 
 Botón en la tarjeta del proyecto: formulario con título, objetivo, agente, archivos permitidos, criterios,
